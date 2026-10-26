@@ -1,7 +1,7 @@
 // DeskBuddy port for the ORIGINAL M5StickC (ESP32-PICO-D4, 80x160 ST7735S TFT).
 // Target: Arduino IDE board "M5StickC"; install the M5StickC library plus Arduino_JSON.
-// Orientation: landscape 160x80. Button A = next page; Button B = mood/detail.
-// Long A opens setup AP; connect to DeskBuddy-Setup (password 12345678), then visit 192.168.4.1.
+// Orientation: landscape 160x80. A short = next/select; B = mood/detail/clock setup.
+// Hold A opens setup; hold B 3 seconds restarts. AP password: 12345678 at 192.168.4.1.
 // For security, Wi-Fi credentials and OpenWeatherMap API key are entered in the portal.
 
 // watch complete making video from here , please subscribe and support us
@@ -19,7 +19,10 @@
 #include <M5StickC.h>
 #include <Eye.h>
 #include "time.h"
+#include <sys/time.h>
 #include <math.h>
+
+enum AlertLevel { ALERT_NONE, ALERT_IMPORTANT, ALERT_CRITICAL };
 
 // ==================================================
 // 1. ASSETS & CONFIG
@@ -100,6 +103,36 @@ struct ForecastDay {
 ForecastDay fcast[3];
 const char* ntpServer = "pool.ntp.org";
 String tzString;   // Loaded from Preferences (e.g. "IST-5:30")
+bool clockIsSet = false;
+bool rtcAvailable = false;
+bool restartPending = false;
+unsigned long restartAt = 0;
+bool clockSaveError = false;
+
+// Clock setup draft; time is stored in the RTC as UTC and converted only for display.
+int clockDraft[6] = { 2026, 1, 1, 12, 0, 0 };
+uint8_t clockEditField = 0; // 0..5 date/time, 6 timezone, 7 save, 8 cancel
+uint8_t clockConfigMode = 0; // 0=field editor, 1=timezone text, 2=timezone choices
+String tzEditBuffer;
+uint8_t tzEditCursor = 0;
+uint8_t tzEditChoice = 0;
+uint8_t tzPresetIndex = 0;
+bool tzEditError = false;
+
+// IMU fused orientation and eye offsets, refreshed independently of LCD frames.
+bool motionSensorOk = false;
+float neutralPitch = 0.0f, neutralRoll = 0.0f;
+float eyeMotionX = 0.0f, eyeMotionY = 0.0f;
+bool motionCalibrated = false;
+unsigned long lastMotionSample = 0;
+
+// Centralized red LED state. Alert levels override Wi-Fi indications.
+AlertLevel activeAlert = ALERT_NONE;
+bool wifiConnecting = false;
+bool wifiIntentionallyDisabled = false;
+bool ledIsOn = false;
+unsigned long ledPatternStarted = 0;
+unsigned long ledLastUpdate = 0;
 
 // ==================================================
 // 2. ULTRA PRO PHYSICS ENGINE
@@ -121,6 +154,59 @@ Preferences prefs;
 WebServer configServer(80);
 bool inConfigMode = false;
 
+struct TimeZoneEntry { const char* iana; const char* posix; };
+// ESP32 newlib accepts POSIX TZ rules, but this image has no zoneinfo database.
+// These explicit mappings cover common IANA zones and their current DST rules.
+const TimeZoneEntry supportedZones[] = {
+  { "UTC", "UTC0" },
+  { "Asia/Kolkata", "IST-5:30" },
+  { "Asia/Tokyo", "JST-9" },
+  { "Asia/Singapore", "SGT-8" },
+  { "Europe/London", "GMT0BST,M3.5.0/1,M10.5.0/2" },
+  { "Europe/Paris", "CET-1CEST,M3.5.0,M10.5.0/3" },
+  { "Europe/Berlin", "CET-1CEST,M3.5.0,M10.5.0/3" },
+  { "America/New_York", "EST5EDT,M3.2.0/2,M11.1.0/2" },
+  { "America/Chicago", "CST6CDT,M3.2.0/2,M11.1.0/2" },
+  { "America/Denver", "MST7MDT,M3.2.0/2,M11.1.0/2" },
+  { "America/Los_Angeles", "PST8PDT,M3.2.0/2,M11.1.0/2" },
+  { "Australia/Sydney", "AEST-10AEDT,M10.1.0,M4.1.0/3" },
+  { "IST-5:30", "IST-5:30" } // migrate the firmware's original stored value
+};
+
+bool timezoneToPosix(const String& input, String& output) {
+  for (size_t i = 0; i < sizeof(supportedZones) / sizeof(supportedZones[0]); ++i) {
+    if (input == supportedZones[i].iana) {
+      output = supportedZones[i].posix;
+      return true;
+    }
+  }
+  // Fixed offset syntax is UTC+HH:MM or UTC-HH:MM (east/west of UTC).
+  if (input.length() == 9 && input.startsWith("UTC") &&
+      (input[3] == '+' || input[3] == '-') && input[6] == ':' &&
+      isDigit(input[4]) && isDigit(input[5]) && isDigit(input[7]) && isDigit(input[8])) {
+    int hours = (input[4] - '0') * 10 + input[5] - '0';
+    int minutes = (input[7] - '0') * 10 + input[8] - '0';
+    if (hours > 14 || minutes > 59 || (hours == 14 && minutes != 0)) return false;
+    // POSIX uses the opposite sign from the user-facing UTC offset.
+    char sign = input[3] == '+' ? '-' : '+';
+    char zone[16];
+    snprintf(zone, sizeof(zone), "UTC%c%02d:%02d", sign, hours, minutes);
+    output = zone;
+    return true;
+  }
+  return false;
+}
+
+void applyTimeZone() {
+  String posix;
+  if (!timezoneToPosix(tzString, posix)) {
+    tzString = "Asia/Kolkata";
+    timezoneToPosix(tzString, posix);
+  }
+  setenv("TZ", posix.c_str(), 1);
+  tzset();
+}
+
 void loadConfig() {
   prefs.begin("deskbuddy", true);
   wifiSsid    = prefs.getString("ssid", "");
@@ -133,7 +219,10 @@ void loadConfig() {
   if (apiKey.isEmpty()) apiKey = "";
   if (city.isEmpty()) city = "Idukki";
   if (countryCode.isEmpty()) countryCode = "IN";
-  if (tzString.isEmpty()) tzString = "IST-5:30";
+  if (tzString.isEmpty()) tzString = "Asia/Kolkata";
+  String validatedTz;
+  if (!timezoneToPosix(tzString, validatedTz)) tzString = "Asia/Kolkata";
+  applyTimeZone();
 }
 
 void saveConfig(const String& s, const String& p, const String& ak,
@@ -202,7 +291,7 @@ label{display:block;margin-top:14px;color:#8ab4e8;font-size:14px;}
   html += R"rawliteral(">
 </div>
 <div class="section"><div class="section-title">Time</div>
-<label>Timezone</label><input name="tz" placeholder="e.g. IST-5:30, EST5EDT" value=")rawliteral";
+<label>Timezone</label><input name="tz" placeholder="Asia/Kolkata or UTC-05:00" value=")rawliteral";
   html += htmlEscape(sTz);
   html += R"rawliteral(">
 </div>
@@ -234,6 +323,12 @@ void handleConfigSave() {
   if (ctr.isEmpty()) ctr = prefs.getString("country", "IN");
   if (tz.isEmpty())  tz  = prefs.getString("tz", "IST-5:30");
   prefs.end();
+  String parsedTz;
+  if (!timezoneToPosix(tz, parsedTz)) {
+    configServer.send(400, "text/plain",
+      "Unsupported timezone. Use a supported IANA name or UTC+HH:MM / UTC-HH:MM.");
+    return;
+  }
   saveConfig(s, p, ak, cty, ctr, tz);
   configServer.send(200, "text/html",
     "<html><body style='font-family:sans-serif;background:#0c1929;color:#e8f4fc;padding:40px;'>"
@@ -244,6 +339,8 @@ void handleConfigSave() {
 
 void startConfigPortal() {
   inConfigMode = true;
+  wifiConnecting = false;
+  wifiIntentionallyDisabled = true;
   WiFi.mode(WIFI_AP);
   WiFi.softAP(CONFIG_AP_SSID, CONFIG_AP_PASS);
   configServer.on("/", handleConfigRoot);
@@ -290,6 +387,199 @@ String urlEncode(const String& value) {
   return encoded;
 }
 
+bool isLeapYear(int year) {
+  return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+}
+
+int daysInMonth(int year, int month) {
+  static const uint8_t days[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+  if (month < 1 || month > 12) return 0;
+  return month == 2 && isLeapYear(year) ? 29 : days[month - 1];
+}
+
+bool validDateTime(const int fields[6]) {
+  return fields[0] >= 2000 && fields[0] <= 2099 &&
+         fields[1] >= 1 && fields[1] <= 12 &&
+         fields[2] >= 1 && fields[2] <= daysInMonth(fields[0], fields[1]) &&
+         fields[3] >= 0 && fields[3] <= 23 &&
+         fields[4] >= 0 && fields[4] <= 59 &&
+         fields[5] >= 0 && fields[5] <= 59;
+}
+
+bool rtcReadUtc(struct tm& utc) {
+  if (!rtcAvailable) return false;
+  // BM8563 seconds bit 7 is VL (voltage-low); the library masks it away.
+  Wire1.beginTransmission(0x51);
+  Wire1.write(0x02);
+  if (Wire1.endTransmission(false) != 0 || Wire1.requestFrom(0x51, 1) != 1) return false;
+  uint8_t rawSeconds = Wire1.read();
+  if (rawSeconds & 0x80) return false;
+
+  RTC_TimeTypeDef timeData = {};
+  RTC_DateTypeDef dateData = {};
+  M5.Rtc.GetTime(&timeData);
+  M5.Rtc.GetData(&dateData);
+  int fields[6] = { dateData.Year, dateData.Month, dateData.Date,
+                    timeData.Hours, timeData.Minutes, timeData.Seconds };
+  if (!validDateTime(fields)) return false;
+  memset(&utc, 0, sizeof(utc));
+  utc.tm_year = fields[0] - 1900;
+  utc.tm_mon = fields[1] - 1;
+  utc.tm_mday = fields[2];
+  utc.tm_hour = fields[3];
+  utc.tm_min = fields[4];
+  utc.tm_sec = fields[5];
+  utc.tm_isdst = 0;
+  return true;
+}
+
+void writeRtcUtc(time_t utcEpoch) {
+  if (!rtcAvailable) return;
+  struct tm utc = {};
+  gmtime_r(&utcEpoch, &utc);
+  RTC_DateTypeDef dateData = {};
+  dateData.Year = utc.tm_year + 1900;
+  dateData.Month = utc.tm_mon + 1;
+  dateData.Date = utc.tm_mday;
+  dateData.WeekDay = utc.tm_wday;
+  RTC_TimeTypeDef timeData = {};
+  timeData.Hours = utc.tm_hour;
+  timeData.Minutes = utc.tm_min;
+  timeData.Seconds = utc.tm_sec;
+  M5.Rtc.SetData(&dateData);
+  M5.Rtc.SetTime(&timeData);
+}
+
+void loadDraftFromClock() {
+  struct tm local = {};
+  time_t now = time(NULL);
+  if (clockIsSet && localtime_r(&now, &local)) {
+    clockDraft[0] = local.tm_year + 1900;
+    clockDraft[1] = local.tm_mon + 1;
+    clockDraft[2] = local.tm_mday;
+    clockDraft[3] = local.tm_hour;
+    clockDraft[4] = local.tm_min;
+    clockDraft[5] = local.tm_sec;
+  } else {
+    const int safeDraft[6] = { 2026, 1, 1, 12, 0, 0 };
+    memcpy(clockDraft, safeDraft, sizeof(clockDraft));
+  }
+}
+
+bool saveManualClock() {
+  if (!validDateTime(clockDraft)) return false;
+  struct tm local = {};
+  local.tm_year = clockDraft[0] - 1900;
+  local.tm_mon = clockDraft[1] - 1;
+  local.tm_mday = clockDraft[2];
+  local.tm_hour = clockDraft[3];
+  local.tm_min = clockDraft[4];
+  local.tm_sec = clockDraft[5];
+  local.tm_isdst = -1;
+  time_t utcEpoch = mktime(&local);
+  if (utcEpoch < 0) return false;
+  // Reject local wall times that do not exist during a DST spring-forward gap.
+  struct tm roundTrip = {};
+  if (!localtime_r(&utcEpoch, &roundTrip) ||
+      roundTrip.tm_year != clockDraft[0] - 1900 ||
+      roundTrip.tm_mon != clockDraft[1] - 1 || roundTrip.tm_mday != clockDraft[2] ||
+      roundTrip.tm_hour != clockDraft[3] || roundTrip.tm_min != clockDraft[4] ||
+      roundTrip.tm_sec != clockDraft[5]) return false;
+
+  writeRtcUtc(utcEpoch);
+  struct timeval tv = { utcEpoch, 0 };
+  settimeofday(&tv, NULL);
+  clockIsSet = true;
+  return true;
+}
+
+void initializeClock() {
+  Wire1.beginTransmission(0x51);
+  rtcAvailable = Wire1.endTransmission() == 0;
+  struct tm utc = {};
+  clockIsSet = rtcReadUtc(utc);
+  if (clockIsSet) {
+    setenv("TZ", "UTC0", 1);
+    tzset();
+    time_t epoch = mktime(&utc);
+    applyTimeZone();
+    struct timeval tv = { epoch, 0 };
+    settimeofday(&tv, NULL);
+  }
+  loadDraftFromClock();
+}
+
+void initializeMotionSensor() {
+  motionSensorOk = M5.Imu.Init() == 0;
+  if (motionSensorOk) {
+    float pitch = 0, roll = 0, yaw = 0;
+    M5.Imu.getAhrsData(&pitch, &roll, &yaw);
+    neutralPitch = pitch;
+    neutralRoll = roll;
+    motionCalibrated = true;
+    lastMotionSample = millis();
+  }
+}
+
+void updateMotionSensor(unsigned long now) {
+  if (!motionSensorOk || now - lastMotionSample < 40) return;
+  float pitch = 0, roll = 0, yaw = 0;
+  M5.Imu.getAhrsData(&pitch, &roll, &yaw); // AHRS fuses accelerometer and gyroscope.
+  lastMotionSample = now;
+  if (!motionCalibrated) {
+    neutralPitch = pitch;
+    neutralRoll = roll;
+    motionCalibrated = true;
+  }
+  float deltaRoll = roll - neutralRoll;
+  float deltaPitch = pitch - neutralPitch;
+  if (fabsf(deltaRoll) < 1.0f) deltaRoll = 0;
+  if (fabsf(deltaPitch) < 1.0f) deltaPitch = 0;
+  float targetX = constrain(deltaRoll * 0.32f, -7.0f, 7.0f);
+  float targetY = constrain(deltaPitch * 0.24f, -5.0f, 5.0f);
+  eyeMotionX += (targetX - eyeMotionX) * 0.22f;
+  eyeMotionY += (targetY - eyeMotionY) * 0.22f;
+}
+
+void setAlertLevel(AlertLevel level) {
+  if (activeAlert != level) {
+    activeAlert = level;
+    ledPatternStarted = millis();
+  }
+}
+
+void initializeStatusLed() {
+  pinMode(M5_LED, OUTPUT);
+  digitalWrite(M5_LED, HIGH); // Original M5StickC red LED is active-low.
+  ledIsOn = false;
+  ledPatternStarted = millis();
+}
+
+void updateStatusLed(unsigned long now) {
+  if (now - ledLastUpdate < 20) return;
+  ledLastUpdate = now;
+  bool on = false;
+  unsigned long elapsed = now - ledPatternStarted;
+  if (activeAlert == ALERT_CRITICAL) {
+    unsigned long t = elapsed % 1200;
+    on = t < 90 || (t >= 180 && t < 270) || (t >= 360 && t < 450);
+  } else if (activeAlert == ALERT_IMPORTANT) {
+    unsigned long t = elapsed % 1400;
+    on = t < 180 || (t >= 360 && t < 540);
+  } else if (wifiConnecting) {
+    on = elapsed % 400 < 200;
+  } else if (wifiIntentionallyDisabled) {
+    unsigned long t = elapsed % 1200;
+    on = t < 100 || (t >= 220 && t < 320); // AP/setup mode: double pulse.
+  } else if (WiFi.status() != WL_CONNECTED) {
+    on = elapsed % 1200 < 140;
+  }
+  if (on != ledIsOn) {
+    digitalWrite(M5_LED, on ? LOW : HIGH);
+    ledIsOn = on;
+  }
+}
+
 void updateMoodBasedOnWeather() {
   int m = MOOD_NORMAL;
   if (weatherMain == "Clear") m = MOOD_HAPPY;
@@ -301,50 +591,200 @@ void updateMoodBasedOnWeather() {
   currentMood = m;
 }
 
+void enterClockSettings() {
+  loadDraftFromClock();
+  clockEditField = 0;
+  clockConfigMode = 0;
+  currentPage = 5;
+  lastPageSwitch = millis();
+}
+
+void cycleClockField() {
+  clockEditField = (clockEditField + 1) % 9;
+}
+
+void adjustClockDraft() {
+  clockSaveError = false;
+  switch (clockEditField) {
+    case 0: clockDraft[0] = clockDraft[0] >= 2099 ? 2000 : clockDraft[0] + 1; break;
+    case 1:
+      clockDraft[1] = clockDraft[1] >= 12 ? 1 : clockDraft[1] + 1;
+      if (clockDraft[2] > daysInMonth(clockDraft[0], clockDraft[1]))
+        clockDraft[2] = daysInMonth(clockDraft[0], clockDraft[1]);
+      break;
+    case 2:
+      clockDraft[2] = clockDraft[2] >= daysInMonth(clockDraft[0], clockDraft[1]) ? 1 : clockDraft[2] + 1;
+      break;
+    case 3: clockDraft[3] = (clockDraft[3] + 1) % 24; break;
+    case 4: clockDraft[4] = (clockDraft[4] + 1) % 60; break;
+    case 5: clockDraft[5] = (clockDraft[5] + 1) % 60; break;
+    default: break;
+  }
+}
+
+void enterTimezoneEditor() {
+  tzPresetIndex = 0;
+  for (uint8_t i = 0; i < sizeof(supportedZones) / sizeof(supportedZones[0]) - 1; ++i) {
+    if (tzString == supportedZones[i].iana) tzPresetIndex = i;
+  }
+  clockConfigMode = 2;
+}
+
+void enterTimezoneTextEditor() {
+  tzEditBuffer = "";
+  tzEditCursor = 0;
+  tzEditChoice = 0;
+  tzEditError = false;
+  clockConfigMode = 1;
+}
+
+void selectTimezonePreset() {
+  const uint8_t presetCount = sizeof(supportedZones) / sizeof(supportedZones[0]) - 1;
+  if (tzPresetIndex == presetCount) {
+    enterTimezoneTextEditor();
+    return;
+  }
+  if (tzPresetIndex == presetCount + 1) {
+    clockConfigMode = 0;
+    return;
+  }
+  tzString = supportedZones[tzPresetIndex].iana;
+  prefs.begin("deskbuddy", false);
+  prefs.putString("tz", tzString);
+  prefs.end();
+  applyTimeZone(); // The UTC epoch and RTC contents are unchanged.
+  clockConfigMode = 0;
+}
+
+void acceptTimezoneCharacter() {
+  static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/_+-:";
+  const uint8_t charCount = sizeof(alphabet) - 1;
+  if (tzEditChoice < charCount) {
+    if (tzEditBuffer.length() < 47) {
+      tzEditBuffer += alphabet[tzEditChoice];
+      ++tzEditCursor;
+    }
+    String parsed;
+    tzEditChoice = tzEditBuffer.length() >= 8 && timezoneToPosix(tzEditBuffer, parsed)
+                     ? charCount + 1 : 0;
+  } else if (tzEditChoice == charCount) { // DEL
+    if (!tzEditBuffer.isEmpty()) {
+      tzEditBuffer.remove(tzEditBuffer.length() - 1);
+      if (tzEditCursor) --tzEditCursor;
+    }
+    tzEditChoice = 0;
+  } else if (tzEditChoice == charCount + 1) { // DONE
+    String posix;
+    if (timezoneToPosix(tzEditBuffer, posix)) {
+      tzString = tzEditBuffer;
+      prefs.begin("deskbuddy", false);
+      prefs.putString("tz", tzString);
+      prefs.end();
+      applyTimeZone(); // UTC epoch/RTC is unchanged.
+      clockConfigMode = 0;
+      clockEditField = 0;
+      tzEditError = false;
+    } else { tzEditError = true; tzEditChoice = 0; }
+  } else { // CANCEL
+    clockConfigMode = 2;
+    tzEditError = false;
+  }
+}
+
 void handleTouch() {
-  // Original M5StickC buttons: A is the front button; B is the side button.
-  // Short A: next page. Short B: cycle mood. Long A: open setup portal.
-  // Long B: open the related detail page (world clock / forecast).
+  // Button A short: next page / select; A held 3s: configuration portal (existing).
+  // Button B short in clock: settings; otherwise existing mood/detail behavior.
+  // Button B held 0.8-3s: existing detail action; held 3s: restart.
   static bool aWasDown = false, bWasDown = false;
   static unsigned long aDownAt = 0, bDownAt = 0;
-  static bool aLongHandled = false, bLongHandled = false;
+  static bool aLongHandled = false, bLongHandled = false, bRepeatAdjusted = false;
+  static unsigned long lastButtonRepeat = 0;
   unsigned long now = millis();
   bool aDown = M5.BtnA.isPressed();
   bool bDown = M5.BtnB.isPressed();
 
   if (aDown && !aWasDown) { aDownAt = now; aLongHandled = false; }
-  if (bDown && !bWasDown) { bDownAt = now; bLongHandled = false; }
-
-  if (aDown && !aLongHandled && now - aDownAt >= 3000) {
+  if (bDown && !bWasDown) {
+    bDownAt = now;
+    bLongHandled = false;
+    bRepeatAdjusted = false;
+    lastButtonRepeat = now;
+  }
+  if (bDown && currentPage == 5 && clockConfigMode == 0 && clockEditField < 6 &&
+      now - bDownAt >= 500 && now - lastButtonRepeat >= 140) {
+    adjustClockDraft();
+    bRepeatAdjusted = true;
+    lastButtonRepeat = now;
+  }
+  if (bDown && !bLongHandled && now - bDownAt >= 3000) {
+    bLongHandled = true;
+    restartPending = true;
+    restartAt = now + 600;
+  }
+  if (aDown && !aLongHandled && now - aDownAt >= CONFIG_HOLD_MS) {
     aLongHandled = true;
     startConfigPortal();
-    return;
-  }
-  if (bDown && !bLongHandled && now - bDownAt >= 800) {
-    bLongHandled = true;
-    lastPageSwitch = now;
-    if (currentPage == 0) {
-      currentMood = (currentMood + 1) % (MOOD_SUSPICIOUS + 1);
-      lastSaccade = 0;
-    } else if (currentPage == 1) currentPage = 3;
-    else if (currentPage == 2) currentPage = 4;
-    else if (currentPage == 3) currentPage = 1;
-    else if (currentPage == 4) currentPage = 2;
   }
 
   if (!aDown && aWasDown && !aLongHandled) {
-    lastPageSwitch = now;
-    if (currentPage == 3) currentPage = 1;
-    else if (currentPage == 4) currentPage = 2;
-    else currentPage = (currentPage + 1) % 3;
+    if (currentPage == 5) {
+      if (clockConfigMode == 0) cycleClockField();
+      else if (clockConfigMode == 1) {
+        static const uint8_t alphabetCount = 26 + 26 + 10 + 5;
+        const uint8_t terminalChoices = 3; // DEL, DONE, CANCEL after ordinary characters.
+        tzEditChoice = (tzEditChoice + 1) % (alphabetCount + terminalChoices);
+      } else {
+        const uint8_t presetCount = sizeof(supportedZones) / sizeof(supportedZones[0]) + 1;
+        tzPresetIndex = (tzPresetIndex + 1) % presetCount; // custom text and Back follow the zones
+      }
+    } else {
+      lastPageSwitch = now;
+      if (currentPage == 3) currentPage = 1;
+      else if (currentPage == 4) currentPage = 2;
+      else currentPage = (currentPage + 1) % 3;
+    }
   }
-  if (!bDown && bWasDown && !bLongHandled && now - bDownAt < 800) {
-    lastPageSwitch = now;
-    if (currentPage == 0) {
+
+  if (!bDown && bWasDown) {
+    unsigned long held = now - bDownAt;
+    if (!bLongHandled && !bRepeatAdjusted && held >= 800) {
+      if (currentPage == 5) {
+        if (clockConfigMode == 1) acceptTimezoneCharacter();
+        else if (clockConfigMode == 2) selectTimezonePreset();
+        else if (clockEditField == 6) enterTimezoneEditor();
+        else if (clockEditField == 7) {
+          if (saveManualClock()) { currentPage = 1; clockSaveError = false; setAlertLevel(ALERT_NONE); }
+          else { clockSaveError = true; setAlertLevel(ALERT_IMPORTANT); }
+        } else if (clockEditField == 8) { currentPage = 1; setAlertLevel(ALERT_NONE); }
+      } else {
+        lastPageSwitch = now;
+        if (currentPage == 0) {
+          currentMood = (currentMood + 1) % (MOOD_SUSPICIOUS + 1);
+          lastSaccade = 0;
+        } else if (currentPage == 1) currentPage = 3;
+        else if (currentPage == 2) currentPage = 4;
+        else if (currentPage == 3) currentPage = 1;
+        else if (currentPage == 4) currentPage = 2;
+      }
+    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == 5) {
+      if (clockConfigMode == 1) acceptTimezoneCharacter();
+      else if (clockConfigMode == 2) selectTimezonePreset();
+      else if (clockEditField < 6) adjustClockDraft();
+      else if (clockEditField == 6) enterTimezoneEditor();
+      else if (clockEditField == 7) {
+        if (saveManualClock()) { currentPage = 1; clockSaveError = false; setAlertLevel(ALERT_NONE); }
+        else { clockSaveError = true; setAlertLevel(ALERT_IMPORTANT); }
+      } else if (clockEditField == 8) { currentPage = 1; setAlertLevel(ALERT_NONE); }
+    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == 1) {
+      enterClockSettings();
+    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == 0) {
       currentMood = (currentMood + 1) % (MOOD_SUSPICIOUS + 1);
       lastSaccade = 0;
-    } else if (currentPage == 3) currentPage = 1;
-    else if (currentPage == 4) currentPage = 2;
+    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == 3) {
+      currentPage = 1;
+    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == 4) {
+      currentPage = 2;
+    }
   }
   aWasDown = aDown;
   bWasDown = bDown;
@@ -435,8 +875,8 @@ void drawEyelidMask(float x, float y, float w, float h, int mood, bool isLeft) {
 }
 
 void drawUltraProEye(Eye& e, bool isLeft) {
-  int ix = (int)e.x;
-  int iy = (int)e.y;
+  int ix = (int)(e.x + eyeMotionX);
+  int iy = (int)(e.y + eyeMotionY);
   int iw = (int)e.w;
   int ih = (int)e.h;
 
@@ -473,7 +913,7 @@ void drawUltraProEye(Eye& e, bool isLeft) {
   }
 
   // 4. Apply Eyelid Masks (Expressions)
-  drawEyelidMask(e.x, e.y, e.w, e.h, currentMood, isLeft);
+  drawEyelidMask(e.x + eyeMotionX, e.y + eyeMotionY, e.w, e.h, currentMood, isLeft);
 }
 
 void updatePhysicsAndMood() {
@@ -497,7 +937,7 @@ void updatePhysicsAndMood() {
   }
 
   // --- SACCADE (Gaze) LOGIC ---
-  if (!leftEye.blinking && now - lastSaccade > saccadeInterval) {
+  if (!motionSensorOk && !leftEye.blinking && now - lastSaccade > saccadeInterval) {
     lastSaccade = now;
     saccadeInterval = random(500, 3000);
 
@@ -651,6 +1091,15 @@ void drawForecastPage() {
   }
 }
 void drawClock() {
+  if (!clockIsSet) {
+    display.setFreeFont(NULL);
+    display.setTextColor(TFT_WHITE, TFT_BLACK);
+    display.setCursor(24, 22);
+    display.print(rtcAvailable ? "Clock Not Set" : "RTC Unavailable");
+    display.setCursor(19, 43);
+    display.print("B: Set Clock");
+    return;
+  }
   struct tm t;
   if (!getLocalTime(&t)) {
     display.setFreeFont(NULL);
@@ -712,6 +1161,15 @@ void drawWeatherCard() {
   display.print(weatherDesc);
 }
 void drawWorldClock() {
+  if (!clockIsSet) {
+    display.setFreeFont(NULL);
+    display.setTextColor(TFT_WHITE, TFT_BLACK);
+    display.setCursor(24, 22);
+    display.print("Clock Not Set");
+    display.setCursor(19, 43);
+    display.print("B: Set Clock");
+    return;
+  }
   time_t now;
   time(&now);
   time_t indiaEpoch = now + (5 * 3600) + (30 * 60);
@@ -748,6 +1206,80 @@ void drawWorldClock() {
   display.setFreeFont(NULL);
   display.setCursor(55, 70);
   display.print("Tap to Exit");
+}
+
+void drawClockSettings() {
+  display.setFreeFont(NULL);
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
+  if (clockConfigMode == 2) {
+    const uint8_t presetCount = sizeof(supportedZones) / sizeof(supportedZones[0]) - 1;
+    display.setCursor(0, 0);
+    display.print("TIME ZONE");
+    display.setTextColor(TFT_YELLOW, TFT_BLACK);
+    display.setCursor(0, 17);
+    if (tzPresetIndex < presetCount) display.print(supportedZones[tzPresetIndex].iana);
+    else if (tzPresetIndex == presetCount) display.print("Custom text...");
+    else display.print("Back to settings");
+    display.setTextColor(TFT_WHITE, TFT_BLACK);
+    display.setCursor(0, 37);
+    display.print("Current: ");
+    display.print(tzString.substring(0, 20));
+    display.setCursor(0, 55);
+    display.print("A: Next  B: Select");
+    display.setCursor(0, 68);
+    display.print("More choices via text");
+    return;
+  }
+  if (clockConfigMode == 1) {
+    display.setCursor(0, 0);
+    display.print("TIME ZONE ENTRY");
+    display.setCursor(0, 13);
+    display.print("Text: ");
+    uint8_t start = tzEditCursor > 18 ? tzEditCursor - 18 : 0;
+    display.print(tzEditBuffer.substring(start, start + 20));
+    display.setCursor(0, 25);
+    display.print("Candidate:");
+    static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/_+-:";
+    uint8_t charCount = sizeof(alphabet) - 1;
+    if (tzEditChoice < charCount) display.printf(" %c", alphabet[tzEditChoice]);
+    else if (tzEditChoice == charCount) display.print(" DEL");
+    else if (tzEditChoice == charCount + 1) display.print(" DONE");
+    else display.print(" CANCEL");
+    display.setCursor(0, 43);
+    display.print("A: Next  B: Add");
+    display.setCursor(0, 55);
+    display.print("Type zone, then DONE");
+    display.setCursor(0, 67);
+    display.print(tzEditError ? "Invalid zone or offset" : "IANA / UTC+HH:MM");
+    return;
+  }
+
+  display.setCursor(0, 0);
+  display.print("CLOCK SETUP");
+  char dateLine[24], timeLine[24];
+  snprintf(dateLine, sizeof(dateLine), "Date %04d-%02d-%02d", clockDraft[0], clockDraft[1], clockDraft[2]);
+  snprintf(timeLine, sizeof(timeLine), "Time %02d:%02d:%02d", clockDraft[3], clockDraft[4], clockDraft[5]);
+  display.setCursor(0, 13);
+  display.print(dateLine);
+  display.setCursor(0, 24);
+  display.print(timeLine);
+  display.setCursor(0, 35);
+  display.print("TZ ");
+  display.print(tzString.substring(0, 23));
+
+  static const char* fields[] = { "YEAR", "MONTH", "DAY", "HOUR", "MIN", "SEC", "TIME ZONE", "SAVE", "CANCEL" };
+  display.fillRect(0, 47, SCREEN_WIDTH, 12, TFT_WHITE);
+  display.setTextColor(TFT_BLACK, TFT_WHITE);
+  display.setCursor(3, 49);
+  display.print("Selected: ");
+  display.print(fields[clockEditField]);
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
+  display.setCursor(0, 63);
+  if (clockEditField < 6) display.print("A: Next field  B: +1");
+  else display.print("A: Next  B: Select");
+  display.setCursor(0, 70);
+  if (clockSaveError) display.print("Invalid time / DST gap");
+  else display.print("Hold B 3s: Restart");
 }
 
 // ==================================================
@@ -790,6 +1322,7 @@ void playBootAnimation() {
 
 void setup() {
   M5.begin();
+  initializeStatusLed();
   M5.Lcd.setRotation(1); // Landscape: 160 x 80 pixels
   M5.Lcd.fillScreen(TFT_BLACK);
   screen.setColorDepth(16);
@@ -817,6 +1350,8 @@ void setup() {
   }
 
   loadConfig();
+  initializeClock();
+  initializeMotionSensor();
 
   if (forceConfig) {
     startConfigPortal();
@@ -836,31 +1371,60 @@ void setup() {
   display.pushSprite(0, 0);
   
   if (wifiSsid.isEmpty()) { startConfigPortal(); return; }
+  wifiIntentionallyDisabled = false;
+  wifiConnecting = true;
+  ledPatternStarted = millis();
   WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
   unsigned long wifiStart = millis();
   while (WiFi.status() != WL_CONNECTED && (millis() - wifiStart < 15000)) {
-    delay(200);
+    updateStatusLed(millis());
+    delay(20);
   }
+  wifiConnecting = false;
+  ledPatternStarted = millis();
   if (WiFi.status() != WL_CONNECTED) {
     startConfigPortal();
     return;
   }
+  wifiIntentionallyDisabled = false;
+  applyTimeZone();
   configTime(0, 0, ntpServer);
-  setenv("TZ", tzString.c_str(), 1);
-  tzset();
   getWeatherAndForecast();
   lastWeatherUpdate = millis();
   lastPageSwitch = millis();
 }
 
 void loop() {
+  unsigned long now = millis();
   if (inConfigMode) {
     configServer.handleClient();
+    updateStatusLed(now);
     return;
   }
   M5.update();
-  unsigned long now = millis();
   handleTouch();
+  updateMotionSensor(now);
+  updateStatusLed(now);
+  if (!clockIsSet && time(NULL) > 1704067200) {
+    // A successful NTP sync can recover the clock if the RTC was unavailable.
+    clockIsSet = true;
+    writeRtcUtc(time(NULL));
+    loadDraftFromClock();
+  }
+  if (restartPending) {
+    static bool restartFrameShown = false;
+    if (!restartFrameShown) {
+      display.fillSprite(TFT_BLACK);
+      display.setFreeFont(NULL);
+      display.setTextColor(TFT_WHITE, TFT_BLACK);
+      display.setCursor(42, 34);
+      display.print("Restarting...");
+      display.pushSprite(0, 0);
+      restartFrameShown = true;
+    }
+    if ((long)(millis() - restartAt) >= 0) ESP.restart();
+    return;
+  }
   if (now - lastWeatherUpdate > 600000) {
     getWeatherAndForecast();
     lastWeatherUpdate = now;
@@ -885,6 +1449,7 @@ void loop() {
     case 2: drawWeatherCard(); break;
     case 3: drawWorldClock(); break;
     case 4: drawForecastPage(); break;
+    case 5: drawClockSettings(); break;
   }
   display.pushSprite(0, 0);
 }
