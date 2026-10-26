@@ -1,8 +1,8 @@
 // DeskBuddy port for the ORIGINAL M5StickC (ESP32-PICO-D4, 80x160 ST7735S TFT).
-// Target: Arduino IDE board "M5StickC"; install the M5StickC library plus Arduino_JSON.
-// Orientation: landscape 160x80. A short = next/select; B = mood/detail/clock setup.
+// Target: Arduino IDE board "M5StickC"; install the M5StickC library.
+// Orientation: landscape 160x80. Button A toggles eyes/clock; B controls moods/settings.
 // Hold A opens setup; hold B 3 seconds restarts. AP password: 12345678 at 192.168.4.1.
-// For security, Wi-Fi credentials and OpenWeatherMap API key are entered in the portal.
+// Wi-Fi credentials and timezone are configured in the portal.
 
 // watch complete making video from here , please subscribe and support us
 // you can buy components and this kit from www.esclabs.in 
@@ -14,8 +14,6 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
-#include <HTTPClient.h>
-#include <Arduino_JSON.h>
 #include <M5StickC.h>
 #include <Eye.h>
 #include "time.h"
@@ -44,30 +42,14 @@ void drawMonoBitmap(int16_t x, int16_t y, const uint8_t *bitmap,
   }
 }
 
-// --- WEATHER ICONS ---
-const unsigned char bmp_clear[] PROGMEM = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x80, 0x00, 0x00, 0x01, 0x80, 0x00, 0x00, 0x01, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x03, 0xc0, 0x80, 0x00, 0x0f, 0xf0, 0x00, 0x00, 0x3f, 0xfc, 0x00, 0x00, 0x7f, 0xfe, 0x00, 0x00, 0xff, 0xff, 0x00, 0x06, 0xff, 0xff, 0x60, 0x06, 0xff, 0xff, 0x60, 0x06, 0xff, 0xff, 0x60, 0x00, 0xff, 0xff, 0x00, 0x3e, 0xff, 0xff, 0x7c, 0x3e, 0xff, 0xff, 0x7c, 0x3e, 0xff, 0xff, 0x7c, 0x00, 0xff, 0xff, 0x00, 0x06, 0xff, 0xff, 0x60, 0x06, 0xff, 0xff, 0x60, 0x06, 0xff, 0xff, 0x60, 0x00, 0xff, 0xff, 0x00, 0x00, 0x7f, 0xfe, 0x00, 0x00, 0x3f, 0xfc, 0x00, 0x01, 0x0f, 0xf0, 0x80, 0x00, 0x03, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x80, 0x00, 0x00, 0x01, 0x80, 0x00, 0x00, 0x01, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-const unsigned char bmp_clouds[] PROGMEM = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xe0, 0x00, 0x00, 0x0f, 0xf8, 0x00, 0x00, 0x1f, 0xfc, 0x00, 0x00, 0x3f, 0xfe, 0x00, 0x00, 0x3f, 0xff, 0x00, 0x00, 0x7f, 0xff, 0x80, 0x00, 0xff, 0xff, 0xc0, 0x00, 0xff, 0xff, 0xe0, 0x01, 0xff, 0xff, 0xf0, 0x03, 0xff, 0xff, 0xf8, 0x07, 0xff, 0xff, 0xfc, 0x07, 0xff, 0xff, 0xfc, 0x0f, 0xff, 0xff, 0xfe, 0x0f, 0xff, 0xff, 0xfe, 0x1f, 0xff, 0xff, 0xff, 0x1f, 0xff, 0xff, 0xff, 0x1f, 0xff, 0xff, 0xff, 0x1f, 0xff, 0xff, 0xff, 0x1f, 0xff, 0xff, 0xff, 0x1f, 0xff, 0xff, 0xff, 0x0f, 0xff, 0xff, 0xfe, 0x07, 0xff, 0xff, 0xfc, 0x03, 0xff, 0xff, 0xf8, 0x00, 0xff, 0xff, 0xe0, 0x00, 0x3f, 0xff, 0x80, 0x00, 0x0f, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-const unsigned char bmp_rain[] PROGMEM = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xe0, 0x00, 0x00, 0x0f, 0xf8, 0x00, 0x00, 0x1f, 0xfc, 0x00, 0x00, 0x3f, 0xfe, 0x00, 0x00, 0x7f, 0xff, 0x80, 0x00, 0xff, 0xff, 0xc0, 0x01, 0xff, 0xff, 0xf0, 0x03, 0xff, 0xff, 0xf8, 0x07, 0xff, 0xff, 0xfc, 0x0f, 0xff, 0xff, 0xfe, 0x1f, 0xff, 0xff, 0xff, 0x1f, 0xff, 0xff, 0xff, 0x1f, 0xff, 0xff, 0xff, 0x1f, 0xff, 0xff, 0xff, 0x0f, 0xff, 0xff, 0xfe, 0x07, 0xff, 0xff, 0xfc, 0x03, 0xff, 0xff, 0xf8, 0x00, 0xff, 0xff, 0xe0, 0x00, 0x3f, 0xff, 0x80, 0x00, 0x0f, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x60, 0x0c, 0x00, 0x00, 0x60, 0x0c, 0x00, 0x00, 0xe0, 0x1c, 0x00, 0x00, 0xc0, 0x18, 0x00, 0x03, 0x80, 0x70, 0x00, 0x03, 0x80, 0x70, 0x00, 0x03, 0x00, 0x60, 0x00, 0x02, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-const unsigned char mini_sun[] PROGMEM = { 0x00, 0x00, 0x01, 0x80, 0x00, 0x00, 0x10, 0x08, 0x04, 0x20, 0x03, 0xc0, 0x27, 0xe4, 0x07, 0xe0, 0x07, 0xe0, 0x27, 0xe4, 0x03, 0xc0, 0x04, 0x20, 0x10, 0x08, 0x00, 0x00, 0x01, 0x80, 0x00, 0x00 };
-const unsigned char mini_cloud[] PROGMEM = { 0x00, 0x00, 0x00, 0x00, 0x01, 0xc0, 0x07, 0xe0, 0x0f, 0xf0, 0x1f, 0xf8, 0x1f, 0xf8, 0x3f, 0xfc, 0x3f, 0xfc, 0x7f, 0xfe, 0x3f, 0xfe, 0x1f, 0xfc, 0x0f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-const unsigned char mini_rain[] PROGMEM = { 0x00, 0x00, 0x00, 0x00, 0x01, 0xc0, 0x07, 0xe0, 0x0f, 0xf0, 0x1f, 0xf8, 0x1f, 0xf8, 0x3f, 0xfc, 0x3f, 0xfc, 0x7f, 0xfe, 0x3f, 0xfe, 0x1f, 0xfc, 0x00, 0x00, 0x44, 0x44, 0x22, 0x22, 0x11, 0x11 };
-const unsigned char bmp_tiny_drop[] PROGMEM = { 0x10, 0x38, 0x7c, 0xfe, 0xfe, 0x7c, 0x38, 0x00 };
-
 // --- EMOTION PARTICLES (16x16) ---
 const unsigned char bmp_heart[] PROGMEM = { 0x00, 0x00, 0x0c, 0x60, 0x1e, 0xf0, 0x3f, 0xf8, 0x7f, 0xfc, 0x7f, 0xfc, 0x7f, 0xfc, 0x3f, 0xf8, 0x1f, 0xf0, 0x0f, 0xe0, 0x07, 0xc0, 0x03, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 const unsigned char bmp_zzz[] PROGMEM = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x0c, 0x00, 0x18, 0x00, 0x30, 0x00, 0x7e, 0x00, 0x00, 0x3c, 0x00, 0x0c, 0x00, 0x18, 0x00, 0x30, 0x00, 0x7c, 0x00, 0x00, 0x00, 0x00, 0x00 };
 const unsigned char bmp_anger[] PROGMEM = { 0x00, 0x00, 0x11, 0x10, 0x2a, 0x90, 0x44, 0x40, 0x80, 0x20, 0x80, 0x20, 0x44, 0x40, 0x2a, 0x90, 0x11, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
 // --- GLOBALS ---
-int currentPage = 0;
-bool highBrightness = true;
-int tapCounter = 0;
-unsigned long lastTapTime = 0;
-bool lastPinState = false;
-unsigned long pressStartTime = 0;
-bool isLongPressHandled = false;
-const unsigned long LONG_PRESS_TIME = 800;
-const unsigned long DOUBLE_TAP_DELAY = 300;
+enum ScreenPage { PAGE_EYES, PAGE_CLOCK, PAGE_WORLD_CLOCK, PAGE_CLOCK_SETTINGS };
+ScreenPage currentPage = PAGE_EYES;
 unsigned long lastPageSwitch = 0;
 const unsigned long PAGE_INTERVAL = 8000;
 
@@ -83,24 +65,8 @@ const unsigned long PAGE_INTERVAL = 8000;
 #define MOOD_SUSPICIOUS 8
 int currentMood = MOOD_NORMAL;
 
-String city;       // Loaded from Preferences
-String countryCode; // Loaded from Preferences
-String apiKey;   // Loaded from Preferences or defaults
 String wifiSsid; // Loaded from Preferences
 String wifiPass; // Loaded from Preferences
-unsigned long lastWeatherUpdate = 0;
-float temperature = 0.0;
-float feelsLike = 0.0;
-int humidity = 0;
-String weatherMain = "Loading";
-String weatherDesc = "Wait...";
-
-struct ForecastDay {
-  String dayName;
-  int temp;
-  String iconType;
-};
-ForecastDay fcast[3];
 const char* ntpServer = "pool.ntp.org";
 String tzString;   // Loaded from Preferences (e.g. "IST-5:30")
 bool clockIsSet = false;
@@ -144,7 +110,7 @@ unsigned long saccadeInterval = 3000;
 float breathVal = 0;
 
 // ==================================================
-// 2b. CONFIG PORTAL (WiFi + API Key via local web)
+// 2b. CONFIG PORTAL (Wi-Fi + timezone via local web)
 // ==================================================
 #define CONFIG_AP_SSID   "DeskBuddy-Setup"
 #define CONFIG_AP_PASS   "12345678"
@@ -211,28 +177,24 @@ void loadConfig() {
   prefs.begin("deskbuddy", true);
   wifiSsid    = prefs.getString("ssid", "");
   wifiPass    = prefs.getString("pass", "");
-  apiKey      = prefs.getString("apikey", "");
-  city        = prefs.getString("city", "");
-  countryCode = prefs.getString("country", "");
   tzString    = prefs.getString("tz", "");
   prefs.end();
-  if (apiKey.isEmpty()) apiKey = "";
-  if (city.isEmpty()) city = "Idukki";
-  if (countryCode.isEmpty()) countryCode = "IN";
+  // Remove obsolete location and service-key preferences from prior releases.
+  prefs.begin("deskbuddy", false);
+  prefs.remove("apikey");
+  prefs.remove("city");
+  prefs.remove("country");
+  prefs.end();
   if (tzString.isEmpty()) tzString = "Asia/Kolkata";
   String validatedTz;
   if (!timezoneToPosix(tzString, validatedTz)) tzString = "Asia/Kolkata";
   applyTimeZone();
 }
 
-void saveConfig(const String& s, const String& p, const String& ak,
-                const String& cty, const String& ctry, const String& tz) {
+void saveConfig(const String& s, const String& p, const String& tz) {
   prefs.begin("deskbuddy", false);
   prefs.putString("ssid", s);
   prefs.putString("pass", p);
-  prefs.putString("apikey", ak);
-  prefs.putString("city", cty);
-  prefs.putString("country", ctry);
   prefs.putString("tz", tz);
   prefs.end();
 }
@@ -256,9 +218,7 @@ String htmlEscape(const String& value) {
 void handleConfigRoot() {
   prefs.begin("deskbuddy", true);
   String sSsid = prefs.getString("ssid", "");
-  String sCity = prefs.getString("city", "Idukki");
-  String sCtry = prefs.getString("country", "IN");
-  String sTz   = prefs.getString("tz", "IST-5:30");
+  String sTz   = prefs.getString("tz", "Asia/Kolkata");
   prefs.end();
 
   String html = R"rawliteral(
@@ -281,17 +241,8 @@ label{display:block;margin-top:14px;color:#8ab4e8;font-size:14px;}
   html += htmlEscape(sSsid);
   html += R"rawliteral(">
 <label>WiFi Password</label><input name="pass" type="password" placeholder="WiFi password">
-<div class="section"><div class="section-title">Weather (OpenWeatherMap)</div>
-<label>API Key</label><input name="apikey" type="password" placeholder="Leave blank to keep the saved key">
-<label>City</label><input name="city" placeholder="e.g. London" value=")rawliteral";
-  html += htmlEscape(sCity);
-  html += R"rawliteral(">
-<label>Country Code</label><input name="country" placeholder="e.g. IN, US, GB" value=")rawliteral";
-  html += htmlEscape(sCtry);
-  html += R"rawliteral(">
-</div>
 <div class="section"><div class="section-title">Time</div>
-<label>Timezone</label><input name="tz" placeholder="Asia/Kolkata or UTC-05:00" value=")rawliteral";
+<label>Timezone (IANA preset or UTC offset)</label><input name="tz" placeholder="Asia/Kolkata or UTC-05:00" value=")rawliteral";
   html += htmlEscape(sTz);
   html += R"rawliteral(">
 </div>
@@ -307,20 +258,14 @@ void handleConfigSave() {
   }
   String s   = configServer.arg("ssid");
   String p   = configServer.arg("pass");
-  String ak  = configServer.arg("apikey");
   // A blank password field means keep the saved password, not erase it.
   if (p.isEmpty()) {
     prefs.begin("deskbuddy", true);
     p = prefs.getString("pass", "");
     prefs.end();
   }
-  String cty = configServer.arg("city");
-  String ctr = configServer.arg("country");
   String tz  = configServer.arg("tz");
   prefs.begin("deskbuddy", true);
-  if (ak.isEmpty())  ak  = prefs.getString("apikey", "");
-  if (cty.isEmpty()) cty = prefs.getString("city", "Idukki");
-  if (ctr.isEmpty()) ctr = prefs.getString("country", "IN");
   if (tz.isEmpty())  tz  = prefs.getString("tz", "IST-5:30");
   prefs.end();
   String parsedTz;
@@ -329,7 +274,7 @@ void handleConfigSave() {
       "Unsupported timezone. Use a supported IANA name or UTC+HH:MM / UTC-HH:MM.");
     return;
   }
-  saveConfig(s, p, ak, cty, ctr, tz);
+  saveConfig(s, p, tz);
   configServer.send(200, "text/html",
     "<html><body style='font-family:sans-serif;background:#0c1929;color:#e8f4fc;padding:40px;'>"
     "<h2 style='color:#5ba3f5'>Saved!</h2><p>Rebooting in 2 seconds...</p></body></html>");
@@ -359,34 +304,6 @@ void startConfigPortal() {
 // ==================================================
 // 3. LOGIC & NETWORK
 // ==================================================
-const unsigned char* getBigIcon(String w) {
-  if (w == "Clear") return bmp_clear;
-  if (w == "Clouds") return bmp_clouds;
-  if (w == "Rain" || w == "Drizzle") return bmp_rain;
-  return bmp_clouds;
-}
-const unsigned char* getMiniIcon(String w) {
-  if (w == "Clear") return mini_sun;
-  if (w == "Rain" || w == "Drizzle" || w == "Thunderstorm") return mini_rain;
-  return mini_cloud;
-}
-
-String urlEncode(const String& value) {
-  const char hex[] = "0123456789ABCDEF";
-  String encoded;
-  for (size_t i = 0; i < value.length(); ++i) {
-    uint8_t c = static_cast<uint8_t>(value[i]);
-    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-      encoded += static_cast<char>(c);
-    } else {
-      encoded += '%';
-      encoded += hex[c >> 4];
-      encoded += hex[c & 0x0F];
-    }
-  }
-  return encoded;
-}
-
 bool isLeapYear(int year) {
   return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
 }
@@ -580,22 +497,11 @@ void updateStatusLed(unsigned long now) {
   }
 }
 
-void updateMoodBasedOnWeather() {
-  int m = MOOD_NORMAL;
-  if (weatherMain == "Clear") m = MOOD_HAPPY;
-  else if (weatherMain == "Rain" || weatherMain == "Drizzle") m = MOOD_SAD;
-  else if (weatherMain == "Thunderstorm") m = MOOD_SURPRISED;
-  else if (weatherMain == "Clouds") m = MOOD_NORMAL;
-  else if (temperature > 25) m = MOOD_EXCITED;
-  else if (temperature < 5) m = MOOD_SLEEPY;
-  currentMood = m;
-}
-
 void enterClockSettings() {
   loadDraftFromClock();
   clockEditField = 0;
   clockConfigMode = 0;
-  currentPage = 5;
+  currentPage = PAGE_CLOCK_SETTINGS;
   lastPageSwitch = millis();
 }
 
@@ -692,7 +598,7 @@ void acceptTimezoneCharacter() {
 }
 
 void handleTouch() {
-  // Button A short: next page / select; A held 3s: configuration portal (existing).
+  // Button A short toggles the two main screens / selects settings; A held 3s opens setup.
   // Button B short in clock: settings; otherwise existing mood/detail behavior.
   // Button B held 0.8-3s: existing detail action; held 3s: restart.
   static bool aWasDown = false, bWasDown = false;
@@ -710,7 +616,7 @@ void handleTouch() {
     bRepeatAdjusted = false;
     lastButtonRepeat = now;
   }
-  if (bDown && currentPage == 5 && clockConfigMode == 0 && clockEditField < 6 &&
+  if (bDown && currentPage == PAGE_CLOCK_SETTINGS && clockConfigMode == 0 && clockEditField < 6 &&
       now - bDownAt >= 500 && now - lastButtonRepeat >= 140) {
     adjustClockDraft();
     bRepeatAdjusted = true;
@@ -727,7 +633,7 @@ void handleTouch() {
   }
 
   if (!aDown && aWasDown && !aLongHandled) {
-    if (currentPage == 5) {
+    if (currentPage == PAGE_CLOCK_SETTINGS) {
       if (clockConfigMode == 0) cycleClockField();
       else if (clockConfigMode == 1) {
         static const uint8_t alphabetCount = 26 + 26 + 10 + 5;
@@ -739,98 +645,50 @@ void handleTouch() {
       }
     } else {
       lastPageSwitch = now;
-      if (currentPage == 3) currentPage = 1;
-      else if (currentPage == 4) currentPage = 2;
-      else currentPage = (currentPage + 1) % 3;
+      // Button A keeps its original navigation role, now toggling only eyes and clock.
+      currentPage = currentPage == PAGE_EYES ? PAGE_CLOCK : PAGE_EYES;
     }
   }
 
   if (!bDown && bWasDown) {
     unsigned long held = now - bDownAt;
     if (!bLongHandled && !bRepeatAdjusted && held >= 800) {
-      if (currentPage == 5) {
+      if (currentPage == PAGE_CLOCK_SETTINGS) {
         if (clockConfigMode == 1) acceptTimezoneCharacter();
         else if (clockConfigMode == 2) selectTimezonePreset();
         else if (clockEditField == 6) enterTimezoneEditor();
         else if (clockEditField == 7) {
-          if (saveManualClock()) { currentPage = 1; clockSaveError = false; setAlertLevel(ALERT_NONE); }
+          if (saveManualClock()) { currentPage = PAGE_CLOCK; clockSaveError = false; setAlertLevel(ALERT_NONE); }
           else { clockSaveError = true; setAlertLevel(ALERT_IMPORTANT); }
-        } else if (clockEditField == 8) { currentPage = 1; setAlertLevel(ALERT_NONE); }
+        } else if (clockEditField == 8) { currentPage = PAGE_CLOCK; setAlertLevel(ALERT_NONE); }
       } else {
         lastPageSwitch = now;
-        if (currentPage == 0) {
+        if (currentPage == PAGE_EYES) {
           currentMood = (currentMood + 1) % (MOOD_SUSPICIOUS + 1);
           lastSaccade = 0;
-        } else if (currentPage == 1) currentPage = 3;
-        else if (currentPage == 2) currentPage = 4;
-        else if (currentPage == 3) currentPage = 1;
-        else if (currentPage == 4) currentPage = 2;
+        } else if (currentPage == PAGE_CLOCK) currentPage = PAGE_WORLD_CLOCK;
+        else if (currentPage == PAGE_WORLD_CLOCK) currentPage = PAGE_CLOCK;
       }
-    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == 5) {
+    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == PAGE_CLOCK_SETTINGS) {
       if (clockConfigMode == 1) acceptTimezoneCharacter();
       else if (clockConfigMode == 2) selectTimezonePreset();
       else if (clockEditField < 6) adjustClockDraft();
       else if (clockEditField == 6) enterTimezoneEditor();
       else if (clockEditField == 7) {
-        if (saveManualClock()) { currentPage = 1; clockSaveError = false; setAlertLevel(ALERT_NONE); }
+        if (saveManualClock()) { currentPage = PAGE_CLOCK; clockSaveError = false; setAlertLevel(ALERT_NONE); }
         else { clockSaveError = true; setAlertLevel(ALERT_IMPORTANT); }
-      } else if (clockEditField == 8) { currentPage = 1; setAlertLevel(ALERT_NONE); }
-    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == 1) {
+      } else if (clockEditField == 8) { currentPage = PAGE_CLOCK; setAlertLevel(ALERT_NONE); }
+    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == PAGE_CLOCK) {
       enterClockSettings();
-    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == 0) {
+    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == PAGE_EYES) {
       currentMood = (currentMood + 1) % (MOOD_SUSPICIOUS + 1);
       lastSaccade = 0;
-    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == 3) {
-      currentPage = 1;
-    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == 4) {
-      currentPage = 2;
+    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == PAGE_WORLD_CLOCK) {
+      currentPage = PAGE_CLOCK;
     }
   }
   aWasDown = aDown;
   bWasDown = bDown;
-}
-
-void getWeatherAndForecast() {
-  if (WiFi.status() != WL_CONNECTED || apiKey.isEmpty()) return;
-  HTTPClient http;
-  String location = urlEncode(city) + "," + urlEncode(countryCode);
-  String url = "http://api.openweathermap.org/data/2.5/weather?q=" + location + "&appid=" + urlEncode(apiKey) + "&units=metric";
-  http.begin(url);
-  if (http.GET() == 200) {
-    String payload = http.getString();
-    JSONVar myObject = JSON.parse(payload);
-    if (JSON.typeof(myObject) != "undefined") {
-      temperature = double(myObject["main"]["temp"]);
-      feelsLike = double(myObject["main"]["feels_like"]);
-      humidity = int(myObject["main"]["humidity"]);
-      weatherMain = (const char*)myObject["weather"][0]["main"];
-      weatherDesc = (const char*)myObject["weather"][0]["description"];
-      weatherDesc[0] = toupper(weatherDesc[0]);
-      updateMoodBasedOnWeather();
-    }
-  }
-  http.end();
-  url = "http://api.openweathermap.org/data/2.5/forecast?q=" + location + "&appid=" + urlEncode(apiKey) + "&units=metric";
-  http.begin(url);
-  if (http.GET() == 200) {
-    String payload = http.getString();
-    JSONVar fo = JSON.parse(payload);
-    if (JSON.typeof(fo) != "undefined") {
-      struct tm t = {};
-      getLocalTime(&t, 1000);
-      int today = t.tm_wday;
-      const char* days[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
-      int indices[3] = { 7, 15, 23 };
-      for (int i = 0; i < 3; i++) {
-        int idx = indices[i];
-        fcast[i].temp = (int)double(fo["list"][idx]["main"]["temp"]);
-        fcast[i].iconType = (const char*)fo["list"][idx]["weather"][0]["main"];
-        int nextDayIndex = (today + i + 1) % 7;
-        fcast[i].dayName = days[nextDayIndex];
-      }
-    }
-  }
-  http.end();
 }
 
 // ==================================================
@@ -1065,31 +923,6 @@ void drawEmoPage() {
 }
 
 // --- STANDARD PAGES ---
-void drawForecastPage() {
-  display.fillRect(0, 0, SCREEN_WIDTH, 18, TFT_WHITE);
-  display.setFreeFont(NULL);
-  display.setTextColor(TFT_BLACK);
-  display.setCursor(43, 5);
-  display.print("3-DAY FORECAST");
-  display.setTextColor(TFT_WHITE);
-  display.drawLine(53, 18, 53, 80, TFT_WHITE);
-  display.drawLine(106, 18, 106, 80, TFT_WHITE);
-  for (int i = 0; i < 3; i++) {
-    int xStart = i * 53;
-    int centerX = xStart + 26;
-    display.setFreeFont(NULL);
-    String d = fcast[i].dayName;
-    if (d == "") d = "Wait";
-    display.setCursor(centerX - (d.length() * 3), 20);
-    display.print(d);
-    drawMonoBitmap(centerX - 8, 30, getMiniIcon(fcast[i].iconType), 16, 16, TFT_WHITE);
-    display.setFreeFont(&FreeSansBold9pt7b);
-    uint16_t w = display.textWidth(String(fcast[i].temp));
-    display.setCursor(centerX - (w / 2), 73);
-    display.print(fcast[i].temp);
-    display.fillCircle(centerX + (w / 2) + 1, 64, 2, TFT_WHITE);
-  }
-}
 void drawClock() {
   if (!clockIsSet) {
     display.setFreeFont(NULL);
@@ -1127,38 +960,6 @@ void drawClock() {
   w = display.textWidth(dateStr);
   display.setCursor((SCREEN_WIDTH - w) / 2, 76);
   display.print(dateStr);
-}
-void drawWeatherCard() {
-  if (WiFi.status() != WL_CONNECTED) {
-    display.setFreeFont(NULL);
-    display.setCursor(0, 0);
-    display.print("No WiFi");
-    return;
-  }
-  drawMonoBitmap(126, 2, getBigIcon(weatherMain), 32, 32, TFT_WHITE);
-  display.setFreeFont(&FreeSansBold9pt7b);
-  String c = city;
-  c.toUpperCase();
-  display.setCursor(0, 16);
-  if (c.length() > 9) c = c.substring(0, 8) + ".";
-  display.print(c);
-  display.setFreeFont(&FreeSansBold18pt7b);
-  int tempInt = (int)temperature;
-  display.setCursor(0, 55);
-  display.print(tempInt);
-  uint16_t w = display.textWidth(String(tempInt));
-  display.fillCircle(w + 5, 35, 4, TFT_WHITE);
-  display.setFreeFont(NULL);
-  drawMonoBitmap(110, 36, bmp_tiny_drop, 8, 8, TFT_WHITE);
-  display.setCursor(122, 36);
-  display.print(humidity);
-  display.print("%");
-  display.setCursor(110, 49);
-  display.print("~");
-  display.print((int)feelsLike);
-  display.drawLine(0, 60, SCREEN_WIDTH, 60, TFT_WHITE);
-  display.setCursor(0, 66);
-  display.print(weatherDesc);
 }
 void drawWorldClock() {
   if (!clockIsSet) {
@@ -1389,8 +1190,6 @@ void setup() {
   wifiIntentionallyDisabled = false;
   applyTimeZone();
   configTime(0, 0, ntpServer);
-  getWeatherAndForecast();
-  lastWeatherUpdate = millis();
   lastPageSwitch = millis();
 }
 
@@ -1425,14 +1224,9 @@ void loop() {
     if ((long)(millis() - restartAt) >= 0) ESP.restart();
     return;
   }
-  if (now - lastWeatherUpdate > 600000) {
-    getWeatherAndForecast();
-    lastWeatherUpdate = now;
-  }
-
-  if (currentPage < 3 && now - lastPageSwitch > PAGE_INTERVAL) {
-    currentPage++;
-    if (currentPage > 2) currentPage = 0;
+  if ((currentPage == PAGE_EYES || currentPage == PAGE_CLOCK) &&
+      now - lastPageSwitch > PAGE_INTERVAL) {
+    currentPage = currentPage == PAGE_EYES ? PAGE_CLOCK : PAGE_EYES;
     lastPageSwitch = now;
     lastSaccade = 0;
   }
@@ -1444,12 +1238,10 @@ void loop() {
 
   display.fillSprite(TFT_BLACK);
   switch (currentPage) {
-    case 0: drawEmoPage(); break;
-    case 1: drawClock(); break;
-    case 2: drawWeatherCard(); break;
-    case 3: drawWorldClock(); break;
-    case 4: drawForecastPage(); break;
-    case 5: drawClockSettings(); break;
+    case PAGE_EYES: drawEmoPage(); break;
+    case PAGE_CLOCK: drawClock(); break;
+    case PAGE_WORLD_CLOCK: drawWorldClock(); break;
+    case PAGE_CLOCK_SETTINGS: drawClockSettings(); break;
   }
   display.pushSprite(0, 0);
 }

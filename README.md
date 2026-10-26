@@ -2,7 +2,7 @@
 
 PlatformIO firmware for the **original M5StickC** (ESP32-PICO-D4, 4 MB flash, 80×160 TFT). M5StickC Plus and Plus 2 are not supported by this target.
 
-Features include animated eyes and expressions, button controls, a Wi-Fi setup portal, local time, current weather, and a three-day forecast. Firmware compilation is verified with PlatformIO; physical-device behavior still needs testing on an original M5StickC.
+Features include animated, motion-controlled eyes and expressions, manual and RTC-backed local time, a Wi-Fi setup portal, a world clock detail screen, and status/alert LEDs. Firmware compilation is verified with PlatformIO; physical-device behavior still needs testing on an original M5StickC.
 
 ## Build
 
@@ -31,7 +31,7 @@ pio device monitor -b 115200
 
 If PlatformIO does not find the serial port, specify it with `upload_port` (for example `/dev/ttyUSB0` or `COM3`) in a local PlatformIO configuration. The monitor runs at 115200 baud. Codespaces generally cannot access USB devices connected to your own computer; flash locally in that case.
 
-## Wi-Fi and weather setup
+## Wi-Fi setup
 
 On first boot, or after a failed Wi-Fi connection, the device opens a setup network:
 
@@ -39,18 +39,20 @@ On first boot, or after a failed Wi-Fi connection, the device opens a setup netw
 - Password: `12345678`
 - Portal: `http://192.168.4.1`
 
-You can also hold Button A during startup, or hold it for three seconds during normal operation, to open the portal. Enter the Wi-Fi SSID and password, an OpenWeatherMap API key, city, country code, and a supported IANA timezone or UTC offset. Saving restarts the device. Leaving a password or API key blank keeps its previously saved value.
+You can also hold Button A during startup, or hold it for three seconds during normal operation, to open the portal. Enter the Wi-Fi SSID and password and a supported IANA timezone or UTC offset. Saving restarts the device. Leaving the password blank keeps its previously saved value.
 
-Settings are stored in ESP32 Preferences. They are not committed to the repository, but they are stored on the device's flash without application-level encryption. The setup access point uses a fixed password, so only use the portal in a trusted physical setting. Weather requests currently use HTTP, which exposes the API key and request data on the network; use a trusted Wi-Fi network.
+Wi-Fi and timezone settings are stored in ESP32 Preferences. They are not committed to the repository, but are stored on the device's flash without application-level encryption. The setup access point uses a fixed password, so only use the portal in a trusted physical setting.
 
 ## Controls and screens
 
-- Short Button A: move to the next main screen (eyes, clock, weather).
-- Short Button B: cycle expressions on the eye screen; on the clock screen, open clock settings. On detail screens, return to the parent screen.
-- Hold Button B for about 0.8–3 seconds: open clock details or the weather forecast.
+- Short Button A: toggle directly between Robot Eyes and Clock, keeping its existing page-navigation role without obsolete pages.
+- Short Button B: cycle expressions on the eye screen; on the clock screen, open clock settings; on World Clock, return to Clock.
+- Hold Button B for about 0.8–3 seconds: open the world clock from Clock; on Eyes, cycle expressions.
 - Hold Button B for three seconds: show “Restarting...” and restart. This takes priority over the detail action.
 - Hold Button A for three seconds: open Wi-Fi setup.
-- Main screens rotate automatically every eight seconds.
+- The two main screens continue to rotate automatically every eight seconds. Clock settings and world clock are secondary clock screens.
+
+There are only two physical buttons and both already have functions, so neither was unused. The front Button A is used for the direct Eyes/Clock toggle because that is the same short-press action it previously used to advance pages; its long-press Wi-Fi setup remains unchanged. Button B keeps mood selection, clock settings/details, and the long-press restart.
 
 ### Clock and time zone
 
@@ -60,8 +62,6 @@ Supported IANA presets include `Asia/Kolkata`, `Europe/London`, `Europe/Paris`, 
 
 The original M5StickC library exposes its BM8563 RTC through `M5.Rtc` and supports SH200Q/MPU6886 sensors through `M5.Imu`; the firmware checks whether the RTC responds and rejects its voltage-low flag. If the RTC is unavailable, manually set time runs only until power is lost or reset, unless NTP later synchronizes it. NVS stores the time-zone setting, not a source of continuously advancing time. The onboard red LED is active-low on `M5_LED`/GPIO 10: slow blink means disconnected, fast blink means connecting, double pulse means setup AP mode, and no light means connected with no alert. Important and critical alert patterns take priority.
 
-Weather refreshes every ten minutes when Wi-Fi and an API key are available.
-
 When the IMU initializes, it captures the startup orientation as neutral and uses the library's accelerometer/gyroscope AHRS estimate to move both eyes smoothly. If IMU detection fails, the existing idle eye saccades remain active.
 
 ## Troubleshooting
@@ -69,9 +69,9 @@ When the IMU initializes, it captures the startup orientation as neutral and use
 - **Build cannot download platform or libraries:** retry with network access and check the PlatformIO registry status; versions are pinned in `platformio.ini`.
 - **Upload fails or no serial port appears:** use a known data-capable USB cable, close other serial monitors, install the USB serial driver if needed, and set `upload_port` explicitly.
 - **Portal does not appear:** hold Button A during power-on, connect to `DeskBuddy-Setup`, and browse directly to `192.168.4.1`.
-- **Weather is blank:** verify Wi-Fi credentials, API key, city and country code, and that the OpenWeatherMap key is active. The clock can take time to synchronize after joining Wi-Fi.
+- **Clock is not set:** set it in Clock settings, or connect Wi-Fi and allow NTP synchronization. Check the RTC voltage-low condition if time does not persist across power loss.
 - **Display or button layout looks wrong:** confirm the device is the original M5StickC, not a Plus model. Rotation and eye placement have not yet been checked on physical hardware.
 
 ## Development
 
-Build with `pio run`. The CI workflow provides the same target build and publishes its binary as an artifact. Test display initialization, buttons, portal persistence, clock, weather, and forecast on physical original M5StickC hardware before relying on them.
+Build with `pio run`. The CI workflow provides the same target build and publishes its binary as an artifact. Test display initialization, buttons, portal persistence, clock/RTC behavior, IMU eye motion, and LED patterns on physical original M5StickC hardware before relying on them.

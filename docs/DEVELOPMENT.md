@@ -6,7 +6,7 @@
 2. Verify display init and orientation on the original M5StickC.
 3. Verify buttons A/B and page changes.
 4. Verify the setup access point and saving settings.
-5. Verify NTP, weather, and forecast data.
+5. Verify NTP and local clock settings.
 6. Only then optimise animation frame rate and battery usage.
 
 ## Important distinction
