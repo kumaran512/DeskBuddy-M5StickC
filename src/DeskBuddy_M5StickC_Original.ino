@@ -1,15 +1,9 @@
 // DeskBuddy port for the ORIGINAL M5StickC (ESP32-PICO-D4, 80x160 ST7735S TFT).
 // Target: Arduino IDE board "M5StickC"; install the M5StickC library.
-// Orientation: landscape 160x80. Button A toggles eyes/clock; B controls moods/settings.
-// Hold A opens setup; hold B 3 seconds restarts. AP password: 12345678 at 192.168.4.1.
+// Orientation: landscape 160x80. The AXP192 power button toggles eyes/clock;
+// BtnA holds for setup; BtnB controls moods/settings and holds 3s to restart.
+// Hold the AXP192 power button for 1.5s to power off. AP password: 12345678.
 // Wi-Fi credentials and timezone are configured in the portal.
-
-// watch complete making video from here , please subscribe and support us
-// you can buy components and this kit from www.esclabs.in 
-
-// ==================================================
-// EDISON SCIENCE CORNER  - ESCLABS
-// ==================================================
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -48,10 +42,8 @@ const unsigned char bmp_zzz[] PROGMEM = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x
 const unsigned char bmp_anger[] PROGMEM = { 0x00, 0x00, 0x11, 0x10, 0x2a, 0x90, 0x44, 0x40, 0x80, 0x20, 0x80, 0x20, 0x44, 0x40, 0x2a, 0x90, 0x11, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
 // --- GLOBALS ---
-enum ScreenPage { PAGE_EYES, PAGE_CLOCK, PAGE_WORLD_CLOCK, PAGE_CLOCK_SETTINGS };
+enum ScreenPage { PAGE_EYES, PAGE_CLOCK, PAGE_CLOCK_SETTINGS };
 ScreenPage currentPage = PAGE_EYES;
-unsigned long lastPageSwitch = 0;
-const unsigned long PAGE_INTERVAL = 8000;
 
 // MOODS
 #define MOOD_NORMAL 0
@@ -64,6 +56,9 @@ const unsigned long PAGE_INTERVAL = 8000;
 #define MOOD_LOVE 7
 #define MOOD_SUSPICIOUS 8
 int currentMood = MOOD_NORMAL;
+unsigned long moodOverrideUntil = 0;
+unsigned long nextAutoMoodAt = 0;
+const unsigned long MOOD_OVERRIDE_MS = 30000;
 
 String wifiSsid; // Loaded from Preferences
 String wifiPass; // Loaded from Preferences
@@ -73,6 +68,9 @@ bool clockIsSet = false;
 bool rtcAvailable = false;
 bool restartPending = false;
 unsigned long restartAt = 0;
+bool powerOffPending = false;
+unsigned long powerOffAt = 0;
+unsigned long lastPowerButtonEvent = 0;
 bool clockSaveError = false;
 
 // Clock setup draft; time is stored in the RTC as UTC and converted only for display.
@@ -96,6 +94,7 @@ unsigned long lastMotionSample = 0;
 AlertLevel activeAlert = ALERT_NONE;
 bool wifiConnecting = false;
 bool wifiIntentionallyDisabled = false;
+unsigned long wifiConnectDeadline = 0;
 bool ledIsOn = false;
 unsigned long ledPatternStarted = 0;
 unsigned long ledLastUpdate = 0;
@@ -112,7 +111,7 @@ float breathVal = 0;
 // ==================================================
 // 2b. CONFIG PORTAL (Wi-Fi + timezone via local web)
 // ==================================================
-#define CONFIG_AP_SSID   "DeskBuddy-Setup"
+#define CONFIG_AP_SSID   "Kumaran Buddy"
 #define CONFIG_AP_PASS   "12345678"
 #define CONFIG_HOLD_MS   3000
 
@@ -295,9 +294,12 @@ void startConfigPortal() {
   display.setFreeFont(NULL);
   display.setTextColor(TFT_WHITE, TFT_BLACK);
   display.setCursor(0, 0);
-  display.print("Config mode\n\nConnect to:\n");
+  display.setTextSize(1);
+  display.print("Connect to Wi-Fi:\n");
   display.print(CONFIG_AP_SSID);
-  display.print("\n\nThen open:\n192.168.4.1");
+  display.print("\nPassword:\n");
+  display.print(CONFIG_AP_PASS);
+  display.print("\nOpen 192.168.4.1");
   display.pushSprite(0, 0);
 }
 
@@ -502,7 +504,6 @@ void enterClockSettings() {
   clockEditField = 0;
   clockConfigMode = 0;
   currentPage = PAGE_CLOCK_SETTINGS;
-  lastPageSwitch = millis();
 }
 
 void cycleClockField() {
@@ -598,9 +599,8 @@ void acceptTimezoneCharacter() {
 }
 
 void handleTouch() {
-  // Button A short toggles the two main screens / selects settings; A held 3s opens setup.
-  // Button B short in clock: settings; otherwise existing mood/detail behavior.
-  // Button B held 0.8-3s: existing detail action; held 3s: restart.
+  // BtnA held 3s opens setup. BtnB retains settings/mood and restart gestures.
+  // The AXP192 power button is handled separately as the third physical button.
   static bool aWasDown = false, bWasDown = false;
   static unsigned long aDownAt = 0, bDownAt = 0;
   static bool aLongHandled = false, bLongHandled = false, bRepeatAdjusted = false;
@@ -643,10 +643,6 @@ void handleTouch() {
         const uint8_t presetCount = sizeof(supportedZones) / sizeof(supportedZones[0]) + 1;
         tzPresetIndex = (tzPresetIndex + 1) % presetCount; // custom text and Back follow the zones
       }
-    } else {
-      lastPageSwitch = now;
-      // Button A keeps its original navigation role, now toggling only eyes and clock.
-      currentPage = currentPage == PAGE_EYES ? PAGE_CLOCK : PAGE_EYES;
     }
   }
 
@@ -661,13 +657,11 @@ void handleTouch() {
           if (saveManualClock()) { currentPage = PAGE_CLOCK; clockSaveError = false; setAlertLevel(ALERT_NONE); }
           else { clockSaveError = true; setAlertLevel(ALERT_IMPORTANT); }
         } else if (clockEditField == 8) { currentPage = PAGE_CLOCK; setAlertLevel(ALERT_NONE); }
-      } else {
-        lastPageSwitch = now;
-        if (currentPage == PAGE_EYES) {
-          currentMood = (currentMood + 1) % (MOOD_SUSPICIOUS + 1);
-          lastSaccade = 0;
-        } else if (currentPage == PAGE_CLOCK) currentPage = PAGE_WORLD_CLOCK;
-        else if (currentPage == PAGE_WORLD_CLOCK) currentPage = PAGE_CLOCK;
+      } else if (currentPage == PAGE_EYES) {
+        currentMood = (currentMood + 1) % (MOOD_SUSPICIOUS + 1);
+        moodOverrideUntil = now + MOOD_OVERRIDE_MS;
+        nextAutoMoodAt = moodOverrideUntil;
+        lastSaccade = 0;
       }
     } else if (!bLongHandled && !bRepeatAdjusted && currentPage == PAGE_CLOCK_SETTINGS) {
       if (clockConfigMode == 1) acceptTimezoneCharacter();
@@ -682,9 +676,9 @@ void handleTouch() {
       enterClockSettings();
     } else if (!bLongHandled && !bRepeatAdjusted && currentPage == PAGE_EYES) {
       currentMood = (currentMood + 1) % (MOOD_SUSPICIOUS + 1);
+      moodOverrideUntil = now + MOOD_OVERRIDE_MS;
+      nextAutoMoodAt = moodOverrideUntil;
       lastSaccade = 0;
-    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == PAGE_WORLD_CLOCK) {
-      currentPage = PAGE_CLOCK;
     }
   }
   aWasDown = aDown;
@@ -961,54 +955,6 @@ void drawClock() {
   display.setCursor((SCREEN_WIDTH - w) / 2, 76);
   display.print(dateStr);
 }
-void drawWorldClock() {
-  if (!clockIsSet) {
-    display.setFreeFont(NULL);
-    display.setTextColor(TFT_WHITE, TFT_BLACK);
-    display.setCursor(24, 22);
-    display.print("Clock Not Set");
-    display.setCursor(19, 43);
-    display.print("B: Set Clock");
-    return;
-  }
-  time_t now;
-  time(&now);
-  time_t indiaEpoch = now + (5 * 3600) + (30 * 60);
-  time_t sydneyEpoch = now + (11 * 3600);
-  struct tm* indiatm = gmtime(&indiaEpoch);
-  int i_h = indiatm->tm_hour;
-  int i_m = indiatm->tm_min;
-  struct tm* sydneytm = gmtime(&sydneyEpoch);
-  int s_h = sydneytm->tm_hour;
-  int s_m = sydneytm->tm_min;
-  display.fillRect(0, 0, SCREEN_WIDTH, 18, TFT_WHITE);
-  display.setFreeFont(NULL);
-  display.setTextColor(TFT_BLACK);
-  display.setCursor(52, 5);
-  display.print("WORLD CLOCK");
-  display.setTextColor(TFT_WHITE);
-  display.drawLine(80, 22, 80, 65, TFT_WHITE);
-  display.setFreeFont(NULL);
-  display.setCursor(22, 26);
-  display.print("INDIA");
-  display.setFreeFont(&FreeSansBold9pt7b);
-  char iStr[10];
-  sprintf(iStr, "%02d:%02d", i_h, i_m);
-  display.setCursor(8, 52);
-  display.print(iStr);
-  display.setFreeFont(NULL);
-  display.setCursor(95, 26);
-  display.print("SYDNEY");
-  display.setFreeFont(&FreeSansBold9pt7b);
-  char sStr[10];
-  sprintf(sStr, "%02d:%02d", s_h, s_m);
-  display.setCursor(87, 52);
-  display.print(sStr);
-  display.setFreeFont(NULL);
-  display.setCursor(55, 70);
-  display.print("Tap to Exit");
-}
-
 void drawClockSettings() {
   display.setFreeFont(NULL);
   display.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -1087,38 +1033,23 @@ void drawClockSettings() {
 // 5. BOOT & MAIN
 // ==================================================
 
-void playBootAnimation() {
-  display.setTextColor(TFT_WHITE);
-  int cx = SCREEN_WIDTH / 2;
-  int cy = SCREEN_HEIGHT / 2;
-  // Expanding Circle Wipe
-  for (int r = 0; r < 100; r += 4) {
+void handlePowerButton() {
+  uint8_t press = M5.Axp.GetBtnPress();
+  unsigned long now = millis();
+  if (press == 0 || (lastPowerButtonEvent != 0 && now - lastPowerButtonEvent < 250)) return;
+  lastPowerButtonEvent = now;
+  if (press & 0x01) { // AXP192 long-press event (library documents 1.5 seconds).
     display.fillSprite(TFT_BLACK);
-    display.fillCircle(cx, cy, r, TFT_WHITE);
+    display.setFreeFont(NULL);
+    display.setTextColor(TFT_WHITE, TFT_BLACK);
+    display.setCursor(28, 38);
+    display.print("Powering off...");
     display.pushSprite(0, 0);
-    delay(10);
+    powerOffPending = true;
+    powerOffAt = now + 700;
+  } else if (press & 0x02) { // AXP192 short-press event.
+    currentPage = currentPage == PAGE_EYES ? PAGE_CLOCK : PAGE_EYES;
   }
-  // Inverse Wipe
-  for (int r = 0; r < 100; r += 4) {
-    display.fillSprite(TFT_BLACK);
-    display.fillCircle(cx, cy, 100, TFT_WHITE);
-    display.fillCircle(cx, cy, r, TFT_BLACK);
-    display.pushSprite(0, 0);
-    delay(10);
-  }
-
-  // Text Display - "PR-TECH"
-  display.setFreeFont(&FreeSansBold9pt7b);
-  String bootText = "ESCLabs";
-
-  // Calculate width to center it perfectly
-  uint16_t w = display.textWidth(bootText);
-
-  display.fillSprite(TFT_BLACK);
-  display.setCursor((SCREEN_WIDTH - w) / 2, 44);
-  display.print(bootText);
-  display.pushSprite(0, 0);
-  delay(2000);
 }
 
 void setup() {
@@ -1139,69 +1070,52 @@ void setup() {
   }
   M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
   M5.Axp.ScreenBreath(12);
+  M5.Axp.EnablePressIRQ(true, true);
   randomSeed((uint32_t)esp_random());
-
-  // Hold button A during boot to force configuration mode.
-  bool forceConfig = false;
-  unsigned long bootCheck = millis();
-  while (millis() - bootCheck < CONFIG_HOLD_MS) {
-    M5.update();
-    if (M5.BtnA.isPressed()) { forceConfig = true; break; }
-    delay(20);
-  }
 
   loadConfig();
   initializeClock();
   initializeMotionSensor();
 
-  if (forceConfig) {
-    startConfigPortal();
-    return;
-  }
-
   // Eye positions sized for the 160 x 80 landscape display.
   leftEye.init(28, 20, 40, 40);
   rightEye.init(92, 20, 40, 40);
 
-  playBootAnimation();
-
-  display.fillSprite(TFT_BLACK);
-  display.setFreeFont(NULL);
-  display.setCursor(40, 30);
-  display.print("connecting");
-  display.pushSprite(0, 0);
-  
   if (wifiSsid.isEmpty()) { startConfigPortal(); return; }
   wifiIntentionallyDisabled = false;
   wifiConnecting = true;
   ledPatternStarted = millis();
   WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
-  unsigned long wifiStart = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - wifiStart < 15000)) {
-    updateStatusLed(millis());
-    delay(20);
-  }
-  wifiConnecting = false;
-  ledPatternStarted = millis();
-  if (WiFi.status() != WL_CONNECTED) {
-    startConfigPortal();
-    return;
-  }
-  wifiIntentionallyDisabled = false;
-  applyTimeZone();
-  configTime(0, 0, ntpServer);
-  lastPageSwitch = millis();
+  wifiConnectDeadline = millis() + 15000;
+  nextAutoMoodAt = millis() + random(12000, 24000);
 }
 
 void loop() {
   unsigned long now = millis();
+  M5.update();
+  handleTouch();
+  handlePowerButton();
+  if (powerOffPending) {
+    if ((long)(now - powerOffAt) >= 0) M5.Axp.PowerOff();
+    updateStatusLed(now);
+    return;
+  }
   if (inConfigMode) {
     configServer.handleClient();
     updateStatusLed(now);
     return;
   }
-  M5.update();
-  handleTouch();
+  if (wifiConnecting) {
+    if (WiFi.status() == WL_CONNECTED) {
+      wifiConnecting = false;
+      ledPatternStarted = now;
+      applyTimeZone();
+      configTime(0, 0, ntpServer);
+    } else if ((long)(now - wifiConnectDeadline) >= 0) {
+      startConfigPortal();
+      return;
+    }
+  }
   updateMotionSensor(now);
   updateStatusLed(now);
   if (!clockIsSet && time(NULL) > 1704067200) {
@@ -1224,11 +1138,16 @@ void loop() {
     if ((long)(millis() - restartAt) >= 0) ESP.restart();
     return;
   }
-  if ((currentPage == PAGE_EYES || currentPage == PAGE_CLOCK) &&
-      now - lastPageSwitch > PAGE_INTERVAL) {
-    currentPage = currentPage == PAGE_EYES ? PAGE_CLOCK : PAGE_EYES;
-    lastPageSwitch = now;
+  if (currentPage == PAGE_EYES && (long)(now - nextAutoMoodAt) >= 0 &&
+      (long)(now - moodOverrideUntil) >= 0) {
+    static const uint8_t moods[] = { MOOD_NORMAL, MOOD_HAPPY, MOOD_SURPRISED,
+                                     MOOD_SLEEPY, MOOD_EXCITED, MOOD_SUSPICIOUS };
+    int nextMood = moods[random(0, sizeof(moods) / sizeof(moods[0]))];
+    if (nextMood == currentMood) nextMood = moods[(random(0, sizeof(moods) / sizeof(moods[0]) - 1) + 1) %
+                                                   (sizeof(moods) / sizeof(moods[0]))];
+    currentMood = nextMood;
     lastSaccade = 0;
+    nextAutoMoodAt = now + random(15000, 35000);
   }
 
   static unsigned long lastFrame = 0;
@@ -1240,7 +1159,6 @@ void loop() {
   switch (currentPage) {
     case PAGE_EYES: drawEmoPage(); break;
     case PAGE_CLOCK: drawClock(); break;
-    case PAGE_WORLD_CLOCK: drawWorldClock(); break;
     case PAGE_CLOCK_SETTINGS: drawClockSettings(); break;
   }
   display.pushSprite(0, 0);

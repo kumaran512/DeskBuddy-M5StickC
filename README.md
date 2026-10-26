@@ -2,7 +2,7 @@
 
 PlatformIO firmware for the **original M5StickC** (ESP32-PICO-D4, 4 MB flash, 80×160 TFT). M5StickC Plus and Plus 2 are not supported by this target.
 
-Features include animated, motion-controlled eyes and expressions, manual and RTC-backed local time, a Wi-Fi setup portal, a world clock detail screen, and status/alert LEDs. Firmware compilation is verified with PlatformIO; physical-device behavior still needs testing on an original M5StickC.
+Features include animated, motion-controlled eyes and expressions, manual and RTC-backed local time, a Wi-Fi setup portal, and status/alert LEDs. Firmware compilation is verified with PlatformIO; physical-device behavior still needs testing on an original M5StickC.
 
 ## Build
 
@@ -35,24 +35,25 @@ If PlatformIO does not find the serial port, specify it with `upload_port` (for 
 
 On first boot, or after a failed Wi-Fi connection, the device opens a setup network:
 
-- SSID: `DeskBuddy-Setup`
+- SSID: `Kumaran Buddy`
 - Password: `12345678`
 - Portal: `http://192.168.4.1`
 
-You can also hold Button A during startup, or hold it for three seconds during normal operation, to open the portal. Enter the Wi-Fi SSID and password and a supported IANA timezone or UTC offset. Saving restarts the device. Leaving the password blank keeps its previously saved value.
+The LCD displays the SSID, actual configured access-point password, and portal address for as long as setup mode is active. Hold Button A for three seconds during normal operation to open the portal. Enter the Wi-Fi SSID and password and a supported IANA timezone or UTC offset. Saving restarts the device. Leaving the password blank keeps its previously saved value.
 
 Wi-Fi and timezone settings are stored in ESP32 Preferences. They are not committed to the repository, but are stored on the device's flash without application-level encryption. The setup access point uses a fixed password, so only use the portal in a trusted physical setting.
 
 ## Controls and screens
 
-- Short Button A: toggle directly between Robot Eyes and Clock, keeping its existing page-navigation role without obsolete pages.
-- Short Button B: cycle expressions on the eye screen; on the clock screen, open clock settings; on World Clock, return to Clock.
-- Hold Button B for about 0.8–3 seconds: open the world clock from Clock; on Eyes, cycle expressions.
-- Hold Button B for three seconds: show “Restarting...” and restart. This takes priority over the detail action.
-- Hold Button A for three seconds: open Wi-Fi setup.
-- The two main screens continue to rotate automatically every eight seconds. Clock settings and world clock are secondary clock screens.
+- Short press the AXP192 power button (the third physical button): toggle between Robot Eyes and Clock. In clock settings, it returns to Robot Eyes.
+- Hold the AXP192 power button until its AXP192 long-press event (about 1.5 seconds): show “Powering off...” and invoke the AXP192 power-off API. This cuts system power except the RTC rail; the device remains off until the AXP192 power button is pressed again. Disconnect USB/battery to remove all power.
+- Short Button B: open clock settings on Clock; select the next expression on Eyes.
+- Hold Button B for about 0.8–3 seconds: select the next expression on Eyes.
+- Hold Button B for three seconds: show “Restarting...” and restart.
+- Hold Button A for three seconds: open Wi-Fi setup. Short Button A has no action.
+- Robot Eyes and Clock remain selected until the AXP192 button is pressed. While Robot Eyes is active, expressions change every 15–35 seconds with natural blinking and motion-controlled eye positioning. A manual expression selection is held for at least 30 seconds before automatic choices resume.
 
-There are only two physical buttons and both already have functions, so neither was unused. The front Button A is used for the direct Eyes/Clock toggle because that is the same short-press action it previously used to advance pages; its long-press Wi-Fi setup remains unchanged. Button B keeps mood selection, clock settings/details, and the long-press restart.
+The library defines two GPIO buttons, `BtnA` and `BtnB`; the third physical control is the AXP192 power button, exposed through its short/long press IRQ API. The third button owns the direct screen toggle and power-off gesture. Button B retains expression selection, clock settings, and restart.
 
 ### Clock and time zone
 
@@ -68,7 +69,7 @@ When the IMU initializes, it captures the startup orientation as neutral and use
 
 - **Build cannot download platform or libraries:** retry with network access and check the PlatformIO registry status; versions are pinned in `platformio.ini`.
 - **Upload fails or no serial port appears:** use a known data-capable USB cable, close other serial monitors, install the USB serial driver if needed, and set `upload_port` explicitly.
-- **Portal does not appear:** hold Button A during power-on, connect to `DeskBuddy-Setup`, and browse directly to `192.168.4.1`.
+- **Portal does not appear:** hold Button A for three seconds, connect to `Kumaran Buddy`, and browse directly to `192.168.4.1`.
 - **Clock is not set:** set it in Clock settings, or connect Wi-Fi and allow NTP synchronization. Check the RTC voltage-low condition if time does not persist across power loss.
 - **Display or button layout looks wrong:** confirm the device is the original M5StickC, not a Plus model. Rotation and eye placement have not yet been checked on physical hardware.
 
