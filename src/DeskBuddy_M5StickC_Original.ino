@@ -26,7 +26,8 @@
 // ==================================================
 #define SCREEN_WIDTH 160
 #define SCREEN_HEIGHT 80
-#define display M5.Lcd
+TFT_eSprite screen = TFT_eSprite(&M5.Lcd);
+#define display screen
 
 // Draw Adafruit-style 1-bit PROGMEM bitmaps on the M5StickC TFT.
 void drawMonoBitmap(int16_t x, int16_t y, const uint8_t *bitmap,
@@ -248,13 +249,14 @@ void startConfigPortal() {
   configServer.on("/", handleConfigRoot);
   configServer.on("/save", HTTP_POST, handleConfigSave);
   configServer.begin();
-  display.fillScreen(TFT_BLACK);
+  display.fillSprite(TFT_BLACK);
   display.setFreeFont(NULL);
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
   display.setCursor(0, 0);
   display.print("Config mode\n\nConnect to:\n");
   display.print(CONFIG_AP_SSID);
   display.print("\n\nThen open:\n192.168.4.1");
-  
+  display.pushSprite(0, 0);
 }
 
 // ==================================================
@@ -758,17 +760,17 @@ void playBootAnimation() {
   int cy = SCREEN_HEIGHT / 2;
   // Expanding Circle Wipe
   for (int r = 0; r < 100; r += 4) {
-    display.fillScreen(TFT_BLACK);
+    display.fillSprite(TFT_BLACK);
     display.fillCircle(cx, cy, r, TFT_WHITE);
-    
+    display.pushSprite(0, 0);
     delay(10);
   }
   // Inverse Wipe
   for (int r = 0; r < 100; r += 4) {
-    display.fillScreen(TFT_BLACK);
+    display.fillSprite(TFT_BLACK);
     display.fillCircle(cx, cy, 100, TFT_WHITE);
     display.fillCircle(cx, cy, r, TFT_BLACK);
-    
+    display.pushSprite(0, 0);
     delay(10);
   }
 
@@ -779,10 +781,10 @@ void playBootAnimation() {
   // Calculate width to center it perfectly
   uint16_t w = display.textWidth(bootText);
 
-  display.fillScreen(TFT_BLACK);
+  display.fillSprite(TFT_BLACK);
   display.setCursor((SCREEN_WIDTH - w) / 2, 44);
   display.print(bootText);
-  
+  display.pushSprite(0, 0);
   delay(2000);
 }
 
@@ -790,6 +792,17 @@ void setup() {
   M5.begin();
   M5.Lcd.setRotation(1); // Landscape: 160 x 80 pixels
   M5.Lcd.fillScreen(TFT_BLACK);
+  screen.setColorDepth(16);
+  if (!screen.createSprite(SCREEN_WIDTH, SCREEN_HEIGHT)) {
+    // The 160x80x16 framebuffer is small enough for the original ESP32.
+    // Keep a direct-render fallback if allocation fails.
+    screen.setColorDepth(8);
+    screen.createSprite(SCREEN_WIDTH, SCREEN_HEIGHT);
+  }
+  if (screen.width() == SCREEN_WIDTH && screen.height() == SCREEN_HEIGHT) {
+    screen.fillSprite(TFT_BLACK);
+    screen.pushSprite(0, 0);
+  }
   M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
   M5.Axp.ScreenBreath(12);
   randomSeed((uint32_t)esp_random());
@@ -816,10 +829,11 @@ void setup() {
 
   playBootAnimation();
 
-  display.fillScreen(TFT_BLACK);
+  display.fillSprite(TFT_BLACK);
   display.setFreeFont(NULL);
   display.setCursor(40, 30);
   display.print("connecting");
+  display.pushSprite(0, 0);
   
   if (wifiSsid.isEmpty()) { startConfigPortal(); return; }
   WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
@@ -859,7 +873,12 @@ void loop() {
     lastSaccade = 0;
   }
 
-  display.fillScreen(TFT_BLACK);
+  static unsigned long lastFrame = 0;
+  const unsigned long FRAME_INTERVAL = 33; // About 30 fps; limits TFT traffic.
+  if (now - lastFrame < FRAME_INTERVAL) return;
+  lastFrame = now;
+
+  display.fillSprite(TFT_BLACK);
   switch (currentPage) {
     case 0: drawEmoPage(); break;
     case 1: drawClock(); break;
@@ -867,5 +886,5 @@ void loop() {
     case 3: drawWorldClock(); break;
     case 4: drawForecastPage(); break;
   }
-  
+  display.pushSprite(0, 0);
 }
