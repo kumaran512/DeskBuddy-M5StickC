@@ -19,9 +19,9 @@
 #include <M5StickC.h>
 #include "time.h"
 #include <math.h>
-#include <Fonts/FreeSansBold18pt7b.h>
-#include <Fonts/FreeSansBold9pt7b.h>
-#include <Fonts/FreeSans9pt7b.h>
+#include <Fonts/GFXFF/FreeSansBold18pt7b.h>
+#include <Fonts/GFXFF/FreeSansBold9pt7b.h>
+#include <Fonts/GFXFF/FreeSans9pt7b.h>
 
 // ==================================================
 // 1. ASSETS & CONFIG
