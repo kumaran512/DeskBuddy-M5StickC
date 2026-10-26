@@ -1,75 +1,66 @@
-# DeskBuddy — Original M5StickC
+# DeskBuddy for the Original M5StickC
 
-A DeskBuddy firmware port for the **original M5StickC** with ESP32-PICO-D4 and 80×160 colour TFT. This repository is organised for development in **GitHub Codespaces** using PlatformIO.
+PlatformIO firmware for the **original M5StickC** (ESP32-PICO-D4, 4 MB flash, 80×160 TFT). M5StickC Plus and Plus 2 are not supported by this target.
 
-> **Status:** Initial port scaffold. The firmware has not yet been verified by compiling in this repository or testing on physical hardware. Treat the first build as a bring-up step and report compiler output before assuming the port is fully working.
+Features include animated eyes and expressions, button controls, a Wi-Fi setup portal, local time, current weather, and a three-day forecast. Firmware compilation is verified with PlatformIO; physical-device behavior still needs testing on an original M5StickC.
 
-## Features intended by the current sketch
+## Build
 
-- Animated robot eyes and mood expressions
-- Built-in M5StickC buttons for interaction
-- Wi-Fi configuration access point and web portal
-- NTP clock, current weather and forecast screens
-- Preferences-based storage of Wi-Fi and weather settings
+Install [PlatformIO Core](https://platformio.org/install/cli) or use the included Codespaces dev container, then run:
 
-## Hardware target
-
-- M5StickC **original model** (ESP32-PICO-D4)
-- Built-in 80×160 ST7735S-family TFT
-- Built-in buttons A and B
-
-This is not the M5StickC Plus or Plus2 project target. Those models have different display dimensions and/or hardware.
-
-## Open in Codespaces
-
-1. Create a new GitHub repository named `DeskBuddy-M5StickC`.
-2. Upload the contents of this project (not the outer ZIP folder) to the repository's default branch.
-3. On the repository page, choose **Code → Codespaces → Create codespace on main**.
-4. Wait for the dev container to finish creating the Python virtual environment and installing PlatformIO.
-5. In the Codespaces terminal, run:
-
-   ```bash
-   ./.venv/bin/pio run
-   ```
-
-6. If compilation succeeds, connect the physical M5StickC to your own computer by USB. Codespaces cannot directly access a USB device connected to your local computer in the normal cloud workflow, so perform the hardware upload locally with PlatformIO/Arduino IDE, or use an appropriate remote-device workflow.
-
-## Local build
-
-Install PlatformIO Core and run:
-
-```bash
+```sh
 pio run
 ```
 
-To upload from a computer with the M5StickC attached:
+In Codespaces, use `./.venv/bin/pio run`. The build targets the `m5stick-c` board and produces:
 
-```bash
+```text
+.pio/build/m5stick-c/firmware.bin
+```
+
+GitHub Actions builds pushes and pull requests and saves the binary as the `deskbuddy-m5stickc-original` workflow artifact.
+
+## Flash
+
+Connect an original M5StickC over USB and run:
+
+```sh
 pio run -t upload
 pio device monitor -b 115200
 ```
 
-## Configuration
+If PlatformIO does not find the serial port, specify it with `upload_port` (for example `/dev/ttyUSB0` or `COM3`) in a local PlatformIO configuration. The monitor runs at 115200 baud. Codespaces generally cannot access USB devices connected to your own computer; flash locally in that case.
 
-The sketch starts the `DeskBuddy-Setup` access point when no Wi-Fi credentials are saved. The current default AP password is `12345678`; connect to it and open `http://192.168.4.1` to enter Wi-Fi and OpenWeatherMap settings.
+## Wi-Fi and weather setup
 
-**Security note:** change the setup AP password before sharing or deploying the firmware. The configuration portal is intended for local setup and should not be exposed to untrusted networks. Weather requests currently use plain HTTP; HTTPS with certificate validation should be added before treating this as a hardened build.
+On first boot, or after a failed Wi-Fi connection, the device opens a setup network:
 
-Do not commit real Wi-Fi passwords, API keys, or other secrets. The current sketch is designed to collect them through its configuration portal and store them in ESP32 Preferences.
+- SSID: `DeskBuddy-Setup`
+- Password: `12345678`
+- Portal: `http://192.168.4.1`
 
-## Development workflow
+You can also hold Button A during startup, or hold it for three seconds during normal operation, to open the portal. Enter the Wi-Fi SSID and password, an OpenWeatherMap API key, city, country code, and POSIX timezone string. Saving restarts the device. Leaving a password or API key blank keeps its previously saved value.
 
-- Make one change at a time and build with `./.venv/bin/pio run`.
-- Keep compiler logs in the issue or pull request when asking for help.
-- Test display initialisation and buttons first, then Wi-Fi/configuration, then time and weather.
-- Track known issues and planned work in GitHub Issues.
+Settings are stored in ESP32 Preferences. They are not committed to the repository, but they are stored on the device's flash without application-level encryption. The setup access point uses a fixed password, so only use the portal in a trusted physical setting. Weather requests currently use HTTP, which exposes the API key and request data on the network; use a trusted Wi-Fi network.
 
-## Planned milestones
+## Controls and screens
 
-- [ ] First clean PlatformIO compile in Codespaces
-- [ ] Verify TFT rotation and eye layout on original M5StickC
-- [ ] Verify buttons, screen navigation and mood controls
-- [ ] Verify configuration portal and Preferences persistence
-- [ ] Verify NTP and weather pages
-- [ ] Improve HTTPS, portal security and reconnection behaviour
-- [ ] Measure battery life and optimise Wi-Fi duty cycle
+- Short Button A: move to the next main screen (eyes, clock, weather).
+- Short Button B: cycle expressions on the eye screen.
+- Hold Button B: open clock details or the weather forecast; short Button B exits details.
+- Hold Button A for three seconds: open Wi-Fi setup.
+- Main screens rotate automatically every eight seconds.
+
+The clock uses the configured POSIX timezone. Weather refreshes every ten minutes when Wi-Fi and an API key are available.
+
+## Troubleshooting
+
+- **Build cannot download platform or libraries:** retry with network access and check the PlatformIO registry status; versions are pinned in `platformio.ini`.
+- **Upload fails or no serial port appears:** use a known data-capable USB cable, close other serial monitors, install the USB serial driver if needed, and set `upload_port` explicitly.
+- **Portal does not appear:** hold Button A during power-on, connect to `DeskBuddy-Setup`, and browse directly to `192.168.4.1`.
+- **Weather is blank:** verify Wi-Fi credentials, API key, city and country code, and that the OpenWeatherMap key is active. The clock can take time to synchronize after joining Wi-Fi.
+- **Display or button layout looks wrong:** confirm the device is the original M5StickC, not a Plus model. Rotation and eye placement have not yet been checked on physical hardware.
+
+## Development
+
+Build with `pio run`. The CI workflow provides the same target build and publishes its binary as an artifact. Test display initialization, buttons, portal persistence, clock, weather, and forecast on physical original M5StickC hardware before relying on them.

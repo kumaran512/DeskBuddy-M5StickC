@@ -17,11 +17,9 @@
 #include <HTTPClient.h>
 #include <Arduino_JSON.h>
 #include <M5StickC.h>
+#include <Eye.h>
 #include "time.h"
 #include <math.h>
-#include <Fonts/GFXFF/FreeSansBold18pt7b.h>
-#include <Fonts/GFXFF/FreeSansBold9pt7b.h>
-#include <Fonts/GFXFF/FreeSans9pt7b.h>
 
 // ==================================================
 // 1. ASSETS & CONFIG
@@ -106,64 +104,6 @@ String tzString;   // Loaded from Preferences (e.g. "IST-5:30")
 // 2. ULTRA PRO PHYSICS ENGINE
 // ==================================================
 
-struct Eye {
-  float x, y;  // Current position (Top-Left)
-  float w, h;  // Current size
-  float targetX, targetY, targetW, targetH;
-
-  // Pupil Physics (Secondary Motion)
-  float pupilX, pupilY;
-  float targetPupilX, targetPupilY;
-
-  // Physics constants
-  float velX, velY, velW, velH;
-  float pVelX, pVelY;
-  float k = 0.12;   // Eye Spring
-  float d = 0.60;   // Eye Damping (Heavier feel)
-  float pk = 0.08;  // Pupil Spring (Softer/Laggier)
-  float pd = 0.50;  // Pupil Damping
-
-  bool blinking;
-  unsigned long lastBlink;
-  unsigned long nextBlinkTime;
-
-  void init(float _x, float _y, float _w, float _h) {
-    x = targetX = _x;
-    y = targetY = _y;
-    w = targetW = _w;
-    h = targetH = _h;
-    pupilX = targetPupilX = 0;
-    pupilY = targetPupilY = 0;
-    nextBlinkTime = millis() + random(1000, 4000);
-  }
-
-  void update() {
-    // 1. Main Eye Physics
-    float ax = (targetX - x) * k;
-    float ay = (targetY - y) * k;
-    float aw = (targetW - w) * k;
-    float ah = (targetH - h) * k;
-
-    velX = (velX + ax) * d;
-    velY = (velY + ay) * d;
-    velW = (velW + aw) * d;
-    velH = (velH + ah) * d;
-
-    x += velX;
-    y += velY;
-    w += velW;
-    h += velH;
-
-    // 2. Pupil Physics (Dragging behind)
-    float pax = (targetPupilX - pupilX) * pk;
-    float pay = (targetPupilY - pupilY) * pk;
-    pVelX = (pVelX + pax) * pd;
-    pVelY = (pVelY + pay) * pd;
-    pupilX += pVelX;
-    pupilY += pVelY;
-  }
-};
-
 Eye leftEye, rightEye;
 unsigned long lastSaccade = 0;
 unsigned long saccadeInterval = 3000;
@@ -207,10 +147,25 @@ void saveConfig(const String& s, const String& p, const String& ak,
   prefs.end();
 }
 
+String htmlEscape(const String& value) {
+  String escaped;
+  escaped.reserve(value.length());
+  for (size_t i = 0; i < value.length(); ++i) {
+    switch (value[i]) {
+      case '&': escaped += "&amp;"; break;
+      case '<': escaped += "&lt;"; break;
+      case '>': escaped += "&gt;"; break;
+      case '"': escaped += "&quot;"; break;
+      case '\'': escaped += "&#39;"; break;
+      default: escaped += value[i]; break;
+    }
+  }
+  return escaped;
+}
+
 void handleConfigRoot() {
   prefs.begin("deskbuddy", true);
   String sSsid = prefs.getString("ssid", "");
-  String sApik = prefs.getString("apikey", "");
   String sCity = prefs.getString("city", "Idukki");
   String sCtry = prefs.getString("country", "IN");
   String sTz   = prefs.getString("tz", "IST-5:30");
@@ -233,23 +188,21 @@ label{display:block;margin-top:14px;color:#8ab4e8;font-size:14px;}
 <h1>DeskBuddy Setup</h1>
 <form action="/save" method="POST">
 <label>WiFi SSID</label><input name="ssid" placeholder="Your WiFi name" value=")rawliteral";
-  html += sSsid;
+  html += htmlEscape(sSsid);
   html += R"rawliteral(">
 <label>WiFi Password</label><input name="pass" type="password" placeholder="WiFi password">
 <div class="section"><div class="section-title">Weather (OpenWeatherMap)</div>
-<label>API Key</label><input name="apikey" placeholder="API key" value=")rawliteral";
-  html += sApik;
-  html += R"rawliteral(">
+<label>API Key</label><input name="apikey" type="password" placeholder="Leave blank to keep the saved key">
 <label>City</label><input name="city" placeholder="e.g. London" value=")rawliteral";
-  html += sCity;
+  html += htmlEscape(sCity);
   html += R"rawliteral(">
 <label>Country Code</label><input name="country" placeholder="e.g. IN, US, GB" value=")rawliteral";
-  html += sCtry;
+  html += htmlEscape(sCtry);
   html += R"rawliteral(">
 </div>
 <div class="section"><div class="section-title">Time</div>
 <label>Timezone</label><input name="tz" placeholder="e.g. IST-5:30, EST5EDT" value=")rawliteral";
-  html += sTz;
+  html += htmlEscape(sTz);
   html += R"rawliteral(">
 </div>
 <button type="submit">Save &amp; Reboot</button>
@@ -296,7 +249,7 @@ void startConfigPortal() {
   configServer.on("/save", HTTP_POST, handleConfigSave);
   configServer.begin();
   display.fillScreen(TFT_BLACK);
-  display.setFont(NULL);
+  display.setFreeFont(NULL);
   display.setCursor(0, 0);
   display.print("Config mode\n\nConnect to:\n");
   display.print(CONFIG_AP_SSID);
@@ -317,6 +270,22 @@ const unsigned char* getMiniIcon(String w) {
   if (w == "Clear") return mini_sun;
   if (w == "Rain" || w == "Drizzle" || w == "Thunderstorm") return mini_rain;
   return mini_cloud;
+}
+
+String urlEncode(const String& value) {
+  const char hex[] = "0123456789ABCDEF";
+  String encoded;
+  for (size_t i = 0; i < value.length(); ++i) {
+    uint8_t c = static_cast<uint8_t>(value[i]);
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      encoded += static_cast<char>(c);
+    } else {
+      encoded += '%';
+      encoded += hex[c >> 4];
+      encoded += hex[c & 0x0F];
+    }
+  }
+  return encoded;
 }
 
 void updateMoodBasedOnWeather() {
@@ -382,7 +351,8 @@ void handleTouch() {
 void getWeatherAndForecast() {
   if (WiFi.status() != WL_CONNECTED || apiKey.isEmpty()) return;
   HTTPClient http;
-  String url = "http://api.openweathermap.org/data/2.5/weather?q=" + city + "," + countryCode + "&appid=" + apiKey + "&units=metric";
+  String location = urlEncode(city) + "," + urlEncode(countryCode);
+  String url = "http://api.openweathermap.org/data/2.5/weather?q=" + location + "&appid=" + urlEncode(apiKey) + "&units=metric";
   http.begin(url);
   if (http.GET() == 200) {
     String payload = http.getString();
@@ -398,14 +368,14 @@ void getWeatherAndForecast() {
     }
   }
   http.end();
-  url = "http://api.openweathermap.org/data/2.5/forecast?q=" + city + "," + countryCode + "&appid=" + apiKey + "&units=metric";
+  url = "http://api.openweathermap.org/data/2.5/forecast?q=" + location + "&appid=" + urlEncode(apiKey) + "&units=metric";
   http.begin(url);
   if (http.GET() == 200) {
     String payload = http.getString();
     JSONVar fo = JSON.parse(payload);
     if (JSON.typeof(fo) != "undefined") {
-      struct tm t;
-      getLocalTime(&t);
+      struct tm t = {};
+      getLocalTime(&t, 1000);
       int today = t.tm_wday;
       const char* days[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
       int indices[3] = { 7, 15, 23 };
@@ -655,7 +625,7 @@ void drawEmoPage() {
 // --- STANDARD PAGES ---
 void drawForecastPage() {
   display.fillRect(0, 0, SCREEN_WIDTH, 18, TFT_WHITE);
-  display.setFont(NULL);
+  display.setFreeFont(NULL);
   display.setTextColor(TFT_BLACK);
   display.setCursor(43, 5);
   display.print("3-DAY FORECAST");
@@ -665,17 +635,15 @@ void drawForecastPage() {
   for (int i = 0; i < 3; i++) {
     int xStart = i * 53;
     int centerX = xStart + 26;
-    display.setFont(NULL);
+    display.setFreeFont(NULL);
     String d = fcast[i].dayName;
     if (d == "") d = "Wait";
     display.setCursor(centerX - (d.length() * 3), 20);
     display.print(d);
     drawMonoBitmap(centerX - 8, 30, getMiniIcon(fcast[i].iconType), 16, 16, TFT_WHITE);
-    display.setFont(&FreeSansBold9pt7b);
-    int16_t x1, y1;
-    uint16_t w, h;
-    display.getTextBounds(String(fcast[i].temp).c_str(), 0, 0, &x1, &y1, &w, &h);
-    display.setCursor(centerX - (w / 2) - 2, 73);
+    display.setFreeFont(&FreeSansBold9pt7b);
+    uint16_t w = display.textWidth(String(fcast[i].temp));
+    display.setCursor(centerX - (w / 2), 73);
     display.print(fcast[i].temp);
     display.fillCircle(centerX + (w / 2) + 1, 64, 2, TFT_WHITE);
   }
@@ -683,7 +651,7 @@ void drawForecastPage() {
 void drawClock() {
   struct tm t;
   if (!getLocalTime(&t)) {
-    display.setFont(NULL);
+    display.setFreeFont(NULL);
     display.setCursor(30, 30);
     display.print("Syncing...");
     return;
@@ -692,48 +660,44 @@ void drawClock() {
   int h12 = t.tm_hour % 12;
   if (h12 == 0) h12 = 12;
   display.setTextColor(TFT_WHITE);
-  display.setFont(NULL);
+  display.setFreeFont(NULL);
   display.setTextSize(1);
   display.setCursor(137, 2);
   display.print(ampm);
-  display.setFont(&FreeSansBold18pt7b);
+  display.setFreeFont(&FreeSansBold18pt7b);
   char timeStr[6];
   sprintf(timeStr, "%02d:%02d", h12, t.tm_min);
-  int16_t x1, y1;
-  uint16_t w, h;
-  display.getTextBounds(timeStr, 0, 0, &x1, &y1, &w, &h);
+  uint16_t w = display.textWidth(timeStr);
   display.setCursor((SCREEN_WIDTH - w) / 2, 48);
   display.print(timeStr);
-  display.setFont(&FreeSans9pt7b);
+  display.setFreeFont(&FreeSans9pt7b);
   char dateStr[20];
   strftime(dateStr, 20, "%a, %b %d", &t);
-  display.getTextBounds(dateStr, 0, 0, &x1, &y1, &w, &h);
+  w = display.textWidth(dateStr);
   display.setCursor((SCREEN_WIDTH - w) / 2, 76);
   display.print(dateStr);
 }
 void drawWeatherCard() {
   if (WiFi.status() != WL_CONNECTED) {
-    display.setFont(NULL);
+    display.setFreeFont(NULL);
     display.setCursor(0, 0);
     display.print("No WiFi");
     return;
   }
   drawMonoBitmap(126, 2, getBigIcon(weatherMain), 32, 32, TFT_WHITE);
-  display.setFont(&FreeSansBold9pt7b);
+  display.setFreeFont(&FreeSansBold9pt7b);
   String c = city;
   c.toUpperCase();
   display.setCursor(0, 16);
   if (c.length() > 9) c = c.substring(0, 8) + ".";
   display.print(c);
-  display.setFont(&FreeSansBold18pt7b);
+  display.setFreeFont(&FreeSansBold18pt7b);
   int tempInt = (int)temperature;
   display.setCursor(0, 55);
   display.print(tempInt);
-  int16_t x1, y1;
-  uint16_t w, h;
-  display.getTextBounds(String(tempInt).c_str(), 0, 55, &x1, &y1, &w, &h);
-  display.fillCircle(x1 + w + 5, 35, 4, TFT_WHITE);
-  display.setFont(NULL);
+  uint16_t w = display.textWidth(String(tempInt));
+  display.fillCircle(w + 5, 35, 4, TFT_WHITE);
+  display.setFreeFont(NULL);
   drawMonoBitmap(110, 36, bmp_tiny_drop, 8, 8, TFT_WHITE);
   display.setCursor(122, 36);
   display.print(humidity);
@@ -757,29 +721,29 @@ void drawWorldClock() {
   int s_h = sydneytm->tm_hour;
   int s_m = sydneytm->tm_min;
   display.fillRect(0, 0, SCREEN_WIDTH, 18, TFT_WHITE);
-  display.setFont(NULL);
+  display.setFreeFont(NULL);
   display.setTextColor(TFT_BLACK);
   display.setCursor(52, 5);
   display.print("WORLD CLOCK");
   display.setTextColor(TFT_WHITE);
   display.drawLine(80, 22, 80, 65, TFT_WHITE);
-  display.setFont(NULL);
+  display.setFreeFont(NULL);
   display.setCursor(22, 26);
   display.print("INDIA");
-  display.setFont(&FreeSansBold9pt7b);
+  display.setFreeFont(&FreeSansBold9pt7b);
   char iStr[10];
   sprintf(iStr, "%02d:%02d", i_h, i_m);
   display.setCursor(8, 52);
   display.print(iStr);
-  display.setFont(NULL);
+  display.setFreeFont(NULL);
   display.setCursor(95, 26);
   display.print("SYDNEY");
-  display.setFont(&FreeSansBold9pt7b);
+  display.setFreeFont(&FreeSansBold9pt7b);
   char sStr[10];
   sprintf(sStr, "%02d:%02d", s_h, s_m);
   display.setCursor(87, 52);
   display.print(sStr);
-  display.setFont(NULL);
+  display.setFreeFont(NULL);
   display.setCursor(55, 70);
   display.print("Tap to Exit");
 }
@@ -809,13 +773,11 @@ void playBootAnimation() {
   }
 
   // Text Display - "PR-TECH"
-  display.setFont(&FreeSansBold9pt7b);
+  display.setFreeFont(&FreeSansBold9pt7b);
   String bootText = "ESCLabs";
 
   // Calculate width to center it perfectly
-  int16_t x1, y1;
-  uint16_t w, h;
-  display.getTextBounds(bootText, 0, 0, &x1, &y1, &w, &h);
+  uint16_t w = display.textWidth(bootText);
 
   display.fillScreen(TFT_BLACK);
   display.setCursor((SCREEN_WIDTH - w) / 2, 44);
@@ -855,7 +817,7 @@ void setup() {
   playBootAnimation();
 
   display.fillScreen(TFT_BLACK);
-  display.setFont(NULL);
+  display.setFreeFont(NULL);
   display.setCursor(40, 30);
   display.print("connecting");
   

@@ -17,3 +17,9 @@ jobs:
         run: python -m pip install --upgrade platformio
       - name: Build firmware
         run: pio run
+      - name: Save firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deskbuddy-m5stickc-original
+          path: .pio/build/m5stick-c/firmware.bin
+          if-no-files-found: error
