@@ -21,6 +21,9 @@ enum AlertLevel { ALERT_NONE, ALERT_IMPORTANT, ALERT_CRITICAL };
 // ==================================================
 #define SCREEN_WIDTH 160
 #define SCREEN_HEIGHT 80
+const int CLOCK_SETUP_LEFT = 4;
+const int WIFI_INFO_LEFT = 4;
+const int CLOCK_AMPM_GAP = 5;
 TFT_eSprite screen = TFT_eSprite(&M5.Lcd);
 #define display screen
 
@@ -76,6 +79,10 @@ bool powerOffPending = false;
 unsigned long powerOffAt = 0;
 unsigned long lastPowerButtonEvent = 0;
 bool clockSaveError = false;
+bool clockNeedsRedraw = true;
+bool clockCacheValid = false;
+bool lastClockAvailable = false;
+int lastClockYear = -1, lastClockDay = -1, lastClockHour = -1, lastClockMinute = -1;
 
 // Clock setup draft; time is stored in the RTC as UTC and converted only for display.
 int clockDraft[6] = { 2026, 1, 1, 12, 0, 0 };
@@ -686,9 +693,9 @@ void handleTouch() {
         else if (clockConfigMode == 2) selectTimezonePreset();
         else if (clockEditField == 6) enterTimezoneEditor();
         else if (clockEditField == 7) {
-          if (saveManualClock()) { currentPage = PAGE_CLOCK; clockSaveError = false; setAlertLevel(ALERT_NONE); }
+          if (saveManualClock()) { currentPage = PAGE_CLOCK; clockNeedsRedraw = true; clockSaveError = false; setAlertLevel(ALERT_NONE); }
           else { clockSaveError = true; setAlertLevel(ALERT_IMPORTANT); }
-        } else if (clockEditField == 8) { currentPage = PAGE_CLOCK; setAlertLevel(ALERT_NONE); }
+        } else if (clockEditField == 8) { currentPage = PAGE_CLOCK; clockNeedsRedraw = true; setAlertLevel(ALERT_NONE); }
       } else if (currentPage == PAGE_EYES && !wifiInfoActive) {
         currentMood = (currentMood + 1) % (MOOD_SUSPICIOUS + 1);
         moodOverrideUntil = now + MOOD_OVERRIDE_MS;
@@ -701,9 +708,9 @@ void handleTouch() {
       else if (clockEditField < 6) adjustClockDraft();
       else if (clockEditField == 6) enterTimezoneEditor();
       else if (clockEditField == 7) {
-        if (saveManualClock()) { currentPage = PAGE_CLOCK; clockSaveError = false; setAlertLevel(ALERT_NONE); }
+        if (saveManualClock()) { currentPage = PAGE_CLOCK; clockNeedsRedraw = true; clockSaveError = false; setAlertLevel(ALERT_NONE); }
         else { clockSaveError = true; setAlertLevel(ALERT_IMPORTANT); }
-      } else if (clockEditField == 8) { currentPage = PAGE_CLOCK; setAlertLevel(ALERT_NONE); }
+      } else if (clockEditField == 8) { currentPage = PAGE_CLOCK; clockNeedsRedraw = true; setAlertLevel(ALERT_NONE); }
     } else if (!bLongHandled && !bRepeatAdjusted && currentPage == PAGE_CLOCK) {
       enterClockSettings();
     } else if (releaseDebounced && !bLongHandled && !bRepeatAdjusted &&
@@ -969,25 +976,36 @@ void drawClock() {
     display.print("Syncing...");
     return;
   }
-  String ampm = (t.tm_hour >= 12) ? "PM" : "AM";
+  const char* ampm = (t.tm_hour >= 12) ? "PM" : "AM";
   int h12 = t.tm_hour % 12;
   if (h12 == 0) h12 = 12;
-  display.setTextColor(TFT_WHITE);
-  display.setFreeFont(NULL);
-  display.setTextSize(1);
-  display.setCursor(137, 2);
-  display.print(ampm);
-  display.setFreeFont(&FreeSansBold18pt7b);
   char timeStr[6];
   sprintf(timeStr, "%02d:%02d", h12, t.tm_min);
-  uint16_t w = display.textWidth(timeStr);
-  display.setCursor((SCREEN_WIDTH - w) / 2, 48);
+
+  // Center the large time and large meridiem indicator as one group. Both
+  // widths come from the installed font metrics, avoiding clipping at 160px.
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
+  display.setFreeFont(&FreeSansBold18pt7b);
+  int timeWidth = display.textWidth(timeStr);
+  display.setFreeFont(&FreeSansBold12pt7b);
+  int amWidth = display.textWidth("AM");
+  int pmWidth = display.textWidth("PM");
+  int ampmColumnWidth = amWidth > pmWidth ? amWidth : pmWidth;
+  int groupWidth = timeWidth + CLOCK_AMPM_GAP + ampmColumnWidth;
+  int groupX = (SCREEN_WIDTH - groupWidth) / 2;
+
+  display.setFreeFont(&FreeSansBold18pt7b);
+  display.setCursor(groupX, 48);
   display.print(timeStr);
+  display.setFreeFont(&FreeSansBold12pt7b);
+  display.setCursor(groupX + timeWidth + CLOCK_AMPM_GAP, 45);
+  display.print(ampm);
+
   display.setFreeFont(&FreeSans9pt7b);
   char dateStr[20];
   strftime(dateStr, 20, "%a, %b %d", &t);
-  w = display.textWidth(dateStr);
-  display.setCursor((SCREEN_WIDTH - w) / 2, 76);
+  int dateWidth = display.textWidth(dateStr);
+  display.setCursor((SCREEN_WIDTH - dateWidth) / 2, 76);
   display.print(dateStr);
 }
 void drawClockSettings() {
@@ -995,31 +1013,31 @@ void drawClockSettings() {
   display.setTextColor(TFT_WHITE, TFT_BLACK);
   if (clockConfigMode == 2) {
     const uint8_t presetCount = sizeof(supportedZones) / sizeof(supportedZones[0]) - 1;
-    display.setCursor(0, 0);
+    display.setCursor(CLOCK_SETUP_LEFT, 0);
     display.print("TIME ZONE");
     display.setTextColor(TFT_YELLOW, TFT_BLACK);
-    display.setCursor(0, 17);
+    display.setCursor(CLOCK_SETUP_LEFT, 17);
     if (tzPresetIndex < presetCount) display.print(supportedZones[tzPresetIndex].iana);
     else if (tzPresetIndex == presetCount) display.print("Custom text...");
     else display.print("Back to settings");
     display.setTextColor(TFT_WHITE, TFT_BLACK);
-    display.setCursor(0, 37);
+    display.setCursor(CLOCK_SETUP_LEFT, 37);
     display.print("Current: ");
-    display.print(tzString.substring(0, 20));
-    display.setCursor(0, 55);
+    display.print(tzString.substring(0, 16));
+    display.setCursor(CLOCK_SETUP_LEFT, 55);
     display.print("A: Next  B: Select");
-    display.setCursor(0, 68);
+    display.setCursor(CLOCK_SETUP_LEFT, 68);
     display.print("More choices via text");
     return;
   }
   if (clockConfigMode == 1) {
-    display.setCursor(0, 0);
+    display.setCursor(CLOCK_SETUP_LEFT, 0);
     display.print("TIME ZONE ENTRY");
-    display.setCursor(0, 13);
+    display.setCursor(CLOCK_SETUP_LEFT, 13);
     display.print("Text: ");
     uint8_t start = tzEditCursor > 18 ? tzEditCursor - 18 : 0;
-    display.print(tzEditBuffer.substring(start, start + 20));
-    display.setCursor(0, 25);
+    display.print(tzEditBuffer.substring(start, start + 18));
+    display.setCursor(CLOCK_SETUP_LEFT, 25);
     display.print("Candidate:");
     static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/_+-:";
     uint8_t charCount = sizeof(alphabet) - 1;
@@ -1027,39 +1045,39 @@ void drawClockSettings() {
     else if (tzEditChoice == charCount) display.print(" DEL");
     else if (tzEditChoice == charCount + 1) display.print(" DONE");
     else display.print(" CANCEL");
-    display.setCursor(0, 43);
+    display.setCursor(CLOCK_SETUP_LEFT, 43);
     display.print("A: Next  B: Add");
-    display.setCursor(0, 55);
+    display.setCursor(CLOCK_SETUP_LEFT, 55);
     display.print("Type zone, then DONE");
-    display.setCursor(0, 67);
+    display.setCursor(CLOCK_SETUP_LEFT, 67);
     display.print(tzEditError ? "Invalid zone or offset" : "IANA / UTC+HH:MM");
     return;
   }
 
-  display.setCursor(0, 0);
+  display.setCursor(CLOCK_SETUP_LEFT, 0);
   display.print("CLOCK SETUP");
   char dateLine[24], timeLine[24];
   snprintf(dateLine, sizeof(dateLine), "Date %04d-%02d-%02d", clockDraft[0], clockDraft[1], clockDraft[2]);
   snprintf(timeLine, sizeof(timeLine), "Time %02d:%02d:%02d", clockDraft[3], clockDraft[4], clockDraft[5]);
-  display.setCursor(0, 13);
+  display.setCursor(CLOCK_SETUP_LEFT, 13);
   display.print(dateLine);
-  display.setCursor(0, 24);
+  display.setCursor(CLOCK_SETUP_LEFT, 24);
   display.print(timeLine);
-  display.setCursor(0, 35);
+  display.setCursor(CLOCK_SETUP_LEFT, 35);
   display.print("TZ ");
-  display.print(tzString.substring(0, 23));
+  display.print(tzString.substring(0, 22));
 
   static const char* fields[] = { "YEAR", "MONTH", "DAY", "HOUR", "MIN", "SEC", "TIME ZONE", "SAVE", "CANCEL" };
   display.fillRect(0, 47, SCREEN_WIDTH, 12, TFT_WHITE);
   display.setTextColor(TFT_BLACK, TFT_WHITE);
-  display.setCursor(3, 49);
+  display.setCursor(CLOCK_SETUP_LEFT + 3, 49);
   display.print("Selected: ");
   display.print(fields[clockEditField]);
   display.setTextColor(TFT_WHITE, TFT_BLACK);
-  display.setCursor(0, 63);
+  display.setCursor(CLOCK_SETUP_LEFT, 63);
   if (clockEditField < 6) display.print("A: Next field  B: +1");
   else display.print("A: Next  B: Select");
-  display.setCursor(0, 70);
+  display.setCursor(CLOCK_SETUP_LEFT, 70);
   if (clockSaveError) display.print("Invalid time / DST gap");
   else display.print("Hold B 3s: Restart");
 }
@@ -1086,7 +1104,11 @@ void handlePowerButton() {
     if (wifiInfoActive) {
       wifiInfoActive = false;
       wifiInfoDirty = false;
-    } else currentPage = currentPage == PAGE_EYES ? PAGE_CLOCK : PAGE_EYES;
+      clockNeedsRedraw = true;
+    } else {
+      currentPage = currentPage == PAGE_EYES ? PAGE_CLOCK : PAGE_EYES;
+      clockNeedsRedraw = true;
+    }
   }
 }
 
@@ -1095,10 +1117,10 @@ String addressText(const IPAddress& address) {
 }
 
 void drawWifiInfoLine(uint8_t& row, const String& text) {
-  const uint8_t charsPerLine = 26;
+  const uint8_t charsPerLine = 25;
   if (text.isEmpty()) { ++row; return; }
   for (size_t offset = 0; offset < text.length() && row < 8; offset += charsPerLine) {
-    display.setCursor(0, row * 9);
+    display.setCursor(WIFI_INFO_LEFT, row * 9);
     display.print(text.substring(offset, offset + charsPerLine));
     ++row;
   }
@@ -1208,7 +1230,7 @@ void drawWifiInfoScreen(unsigned long now) {
     drawWifiInfoLine(row, "AP IP: " + (apEnabled ? addressText(WiFi.softAPIP()) : String("N/A")));
   }
 
-  display.setCursor(0, 72);
+  display.setCursor(WIFI_INFO_LEFT, 72);
   display.print("B: Next   Power: Exit");
   display.pushSprite(0, 0);
   lastWifiInfoRefresh = now;
@@ -1322,10 +1344,30 @@ void loop() {
     return;
   }
 
-  static unsigned long lastFrame = 0;
-  const unsigned long FRAME_INTERVAL = 33; // About 30 fps; limits TFT traffic.
-  if (now - lastFrame < FRAME_INTERVAL) return;
-  lastFrame = now;
+  if (currentPage == PAGE_CLOCK) {
+    time_t epoch = time(NULL);
+    struct tm local = {};
+    bool timeAvailable = clockIsSet && localtime_r(&epoch, &local);
+    bool timeChanged = !clockCacheValid || timeAvailable != lastClockAvailable;
+    if (timeAvailable && (!clockCacheValid || local.tm_year != lastClockYear ||
+        local.tm_yday != lastClockDay || local.tm_hour != lastClockHour ||
+        local.tm_min != lastClockMinute)) timeChanged = true;
+    if (!clockNeedsRedraw && !timeChanged) return;
+    clockCacheValid = true;
+    lastClockAvailable = timeAvailable;
+    if (timeAvailable) {
+      lastClockYear = local.tm_year;
+      lastClockDay = local.tm_yday;
+      lastClockHour = local.tm_hour;
+      lastClockMinute = local.tm_min;
+    }
+    clockNeedsRedraw = false;
+  } else {
+    static unsigned long lastFrame = 0;
+    const unsigned long FRAME_INTERVAL = 33; // About 30 fps; limits TFT traffic.
+    if (now - lastFrame < FRAME_INTERVAL) return;
+    lastFrame = now;
+  }
 
   display.fillSprite(TFT_BLACK);
   switch (currentPage) {
