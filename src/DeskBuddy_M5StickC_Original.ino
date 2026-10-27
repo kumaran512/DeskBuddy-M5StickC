@@ -44,6 +44,10 @@ const unsigned char bmp_anger[] PROGMEM = { 0x00, 0x00, 0x11, 0x10, 0x2a, 0x90, 
 // --- GLOBALS ---
 enum ScreenPage { PAGE_EYES, PAGE_CLOCK, PAGE_CLOCK_SETTINGS };
 ScreenPage currentPage = PAGE_EYES;
+bool wifiInfoActive = false;
+bool wifiInfoDirty = false;
+uint8_t wifiInfoPage = 0;
+unsigned long lastWifiInfoRefresh = 0;
 
 // MOODS
 #define MOOD_NORMAL 0
@@ -95,6 +99,8 @@ AlertLevel activeAlert = ALERT_NONE;
 bool wifiConnecting = false;
 bool wifiIntentionallyDisabled = false;
 unsigned long wifiConnectDeadline = 0;
+unsigned long wifiConnectedAt = 0;
+bool wifiWasConnected = false;
 bool ledIsOn = false;
 unsigned long ledPatternStarted = 0;
 unsigned long ledLastUpdate = 0;
@@ -165,11 +171,21 @@ bool timezoneToPosix(const String& input, String& output) {
 void applyTimeZone() {
   String posix;
   if (!timezoneToPosix(tzString, posix)) {
-    tzString = "Asia/Kolkata";
+    tzString = "UTC";
     timezoneToPosix(tzString, posix);
   }
   setenv("TZ", posix.c_str(), 1);
   tzset();
+}
+
+void configureNtpTime() {
+  String posix;
+  if (!timezoneToPosix(tzString, posix)) {
+    tzString = "UTC";
+    timezoneToPosix(tzString, posix);
+  }
+  // Unlike configTime(), configTzTime() does not replace the selected zone with UTC.
+  configTzTime(posix.c_str(), ntpServer);
 }
 
 void loadConfig() {
@@ -184,9 +200,14 @@ void loadConfig() {
   prefs.remove("city");
   prefs.remove("country");
   prefs.end();
-  if (tzString.isEmpty()) tzString = "Asia/Kolkata";
+  if (tzString.isEmpty()) tzString = "UTC";
   String validatedTz;
-  if (!timezoneToPosix(tzString, validatedTz)) tzString = "Asia/Kolkata";
+  if (!timezoneToPosix(tzString, validatedTz)) {
+    tzString = "UTC";
+    prefs.begin("deskbuddy", false);
+    prefs.putString("tz", tzString);
+    prefs.end();
+  }
   applyTimeZone();
 }
 
@@ -217,7 +238,7 @@ String htmlEscape(const String& value) {
 void handleConfigRoot() {
   prefs.begin("deskbuddy", true);
   String sSsid = prefs.getString("ssid", "");
-  String sTz   = prefs.getString("tz", "Asia/Kolkata");
+  String sTz   = prefs.getString("tz", "UTC");
   prefs.end();
 
   String html = R"rawliteral(
@@ -265,7 +286,7 @@ void handleConfigSave() {
   }
   String tz  = configServer.arg("tz");
   prefs.begin("deskbuddy", true);
-  if (tz.isEmpty())  tz  = prefs.getString("tz", "IST-5:30");
+  if (tz.isEmpty())  tz  = prefs.getString("tz", "UTC");
   prefs.end();
   String parsedTz;
   if (!timezoneToPosix(tz, parsedTz)) {
@@ -282,6 +303,7 @@ void handleConfigSave() {
 }
 
 void startConfigPortal() {
+  wifiInfoActive = false;
   inConfigMode = true;
   wifiConnecting = false;
   wifiIntentionallyDisabled = true;
@@ -323,6 +345,15 @@ bool validDateTime(const int fields[6]) {
          fields[3] >= 0 && fields[3] <= 23 &&
          fields[4] >= 0 && fields[4] <= 59 &&
          fields[5] >= 0 && fields[5] <= 59;
+}
+
+time_t utcStructToEpoch(const struct tm& utc) {
+  int year = utc.tm_year + 1900;
+  time_t days = 0;
+  for (int y = 1970; y < year; ++y) days += isLeapYear(y) ? 366 : 365;
+  for (int month = 1; month <= utc.tm_mon; ++month) days += daysInMonth(year, month);
+  days += utc.tm_mday - 1;
+  return days * 86400 + utc.tm_hour * 3600 + utc.tm_min * 60 + utc.tm_sec;
 }
 
 bool rtcReadUtc(struct tm& utc) {
@@ -418,10 +449,7 @@ void initializeClock() {
   struct tm utc = {};
   clockIsSet = rtcReadUtc(utc);
   if (clockIsSet) {
-    setenv("TZ", "UTC0", 1);
-    tzset();
-    time_t epoch = mktime(&utc);
-    applyTimeZone();
+    time_t epoch = utcStructToEpoch(utc); // BM8563 contents are explicitly stored as UTC.
     struct timeval tv = { epoch, 0 };
     settimeofday(&tv, NULL);
   }
@@ -599,7 +627,8 @@ void acceptTimezoneCharacter() {
 }
 
 void handleTouch() {
-  // BtnA held 3s opens setup. BtnB retains settings/mood and restart gestures.
+  // BtnA held 3s opens setup. BtnB short presses open/cycle network diagnostics;
+  // longer presses retain mood, clock setup, and restart gestures.
   // The AXP192 power button is handled separately as the third physical button.
   static bool aWasDown = false, bWasDown = false;
   static unsigned long aDownAt = 0, bDownAt = 0;
@@ -647,8 +676,11 @@ void handleTouch() {
   }
 
   if (!bDown && bWasDown) {
+    static unsigned long lastBReleaseAction = 0;
+    bool releaseDebounced = lastBReleaseAction == 0 || now - lastBReleaseAction >= 180;
+    if (releaseDebounced) lastBReleaseAction = now;
     unsigned long held = now - bDownAt;
-    if (!bLongHandled && !bRepeatAdjusted && held >= 800) {
+    if (releaseDebounced && !bLongHandled && !bRepeatAdjusted && held >= 800) {
       if (currentPage == PAGE_CLOCK_SETTINGS) {
         if (clockConfigMode == 1) acceptTimezoneCharacter();
         else if (clockConfigMode == 2) selectTimezonePreset();
@@ -657,13 +689,13 @@ void handleTouch() {
           if (saveManualClock()) { currentPage = PAGE_CLOCK; clockSaveError = false; setAlertLevel(ALERT_NONE); }
           else { clockSaveError = true; setAlertLevel(ALERT_IMPORTANT); }
         } else if (clockEditField == 8) { currentPage = PAGE_CLOCK; setAlertLevel(ALERT_NONE); }
-      } else if (currentPage == PAGE_EYES) {
+      } else if (currentPage == PAGE_EYES && !wifiInfoActive) {
         currentMood = (currentMood + 1) % (MOOD_SUSPICIOUS + 1);
         moodOverrideUntil = now + MOOD_OVERRIDE_MS;
         nextAutoMoodAt = moodOverrideUntil;
         lastSaccade = 0;
-      }
-    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == PAGE_CLOCK_SETTINGS) {
+      } else if (currentPage == PAGE_CLOCK && !wifiInfoActive) enterClockSettings();
+    } else if (releaseDebounced && !bLongHandled && !bRepeatAdjusted && currentPage == PAGE_CLOCK_SETTINGS) {
       if (clockConfigMode == 1) acceptTimezoneCharacter();
       else if (clockConfigMode == 2) selectTimezonePreset();
       else if (clockEditField < 6) adjustClockDraft();
@@ -674,11 +706,14 @@ void handleTouch() {
       } else if (clockEditField == 8) { currentPage = PAGE_CLOCK; setAlertLevel(ALERT_NONE); }
     } else if (!bLongHandled && !bRepeatAdjusted && currentPage == PAGE_CLOCK) {
       enterClockSettings();
-    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == PAGE_EYES) {
-      currentMood = (currentMood + 1) % (MOOD_SUSPICIOUS + 1);
-      moodOverrideUntil = now + MOOD_OVERRIDE_MS;
-      nextAutoMoodAt = moodOverrideUntil;
-      lastSaccade = 0;
+    } else if (releaseDebounced && !bLongHandled && !bRepeatAdjusted &&
+               (currentPage == PAGE_EYES || currentPage == PAGE_CLOCK)) {
+      if (wifiInfoActive) wifiInfoPage = (wifiInfoPage + 1) % 5;
+      else {
+        wifiInfoActive = true;
+        wifiInfoPage = 0;
+      }
+      wifiInfoDirty = true;
     }
   }
   aWasDown = aDown;
@@ -1048,8 +1083,136 @@ void handlePowerButton() {
     powerOffPending = true;
     powerOffAt = now + 700;
   } else if (press & 0x02) { // AXP192 short-press event.
-    currentPage = currentPage == PAGE_EYES ? PAGE_CLOCK : PAGE_EYES;
+    if (wifiInfoActive) {
+      wifiInfoActive = false;
+      wifiInfoDirty = false;
+    } else currentPage = currentPage == PAGE_EYES ? PAGE_CLOCK : PAGE_EYES;
   }
+}
+
+String addressText(const IPAddress& address) {
+  return address == IPAddress(0, 0, 0, 0) ? String("N/A") : address.toString();
+}
+
+void drawWifiInfoLine(uint8_t& row, const String& text) {
+  const uint8_t charsPerLine = 26;
+  if (text.isEmpty()) { ++row; return; }
+  for (size_t offset = 0; offset < text.length() && row < 8; offset += charsPerLine) {
+    display.setCursor(0, row * 9);
+    display.print(text.substring(offset, offset + charsPerLine));
+    ++row;
+  }
+}
+
+String wifiStatusText(bool stationEnabled, bool accessPointEnabled, bool stationConnected) {
+  if (stationConnected) return "Connected";
+  if (!stationEnabled) return accessPointEnabled ? "AP Active" : "Disabled";
+  if (wifiConnecting || WiFi.status() == WL_IDLE_STATUS) return "Connecting";
+  return "Disconnected";
+}
+
+String wifiModeText(wifi_mode_t mode) {
+  bool sta = (mode & WIFI_MODE_STA) != 0;
+  bool ap = (mode & WIFI_MODE_AP) != 0;
+  if (sta && ap) return "STA + AP";
+  if (sta) return "STA";
+  if (ap) return "AP";
+  return "Disabled";
+}
+
+String wifiFailureText(wl_status_t status) {
+  switch (status) {
+    case WL_NO_SSID_AVAIL: return "No matching SSID";
+    case WL_CONNECT_FAILED: return "Connect failed";
+    case WL_CONNECTION_LOST: return "Connection lost";
+    case WL_DISCONNECTED: return "Disconnected";
+    case WL_CONNECTED: return "Connected";
+    default: return "Unavailable";
+  }
+}
+
+void drawWifiInfoScreen(unsigned long now) {
+  wifi_mode_t mode = WiFi.getMode();
+  bool staEnabled = (mode & WIFI_MODE_STA) != 0;
+  bool apEnabled = (mode & WIFI_MODE_AP) != 0;
+  bool staConnected = staEnabled && WiFi.status() == WL_CONNECTED;
+  uint8_t row = 0;
+
+  display.fillSprite(TFT_BLACK);
+  display.setFreeFont(NULL);
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
+
+  if (wifiInfoPage == 0) {
+    drawWifiInfoLine(row, "WI-FI STATUS");
+    drawWifiInfoLine(row, "Status: " + wifiStatusText(staEnabled, apEnabled, staConnected));
+    drawWifiInfoLine(row, "Mode: " + wifiModeText(mode));
+    if (staConnected) drawWifiInfoLine(row, "SSID: " + WiFi.SSID());
+    else if (apEnabled) drawWifiInfoLine(row, "AP SSID: " + WiFi.softAPSSID());
+    else drawWifiInfoLine(row, "SSID: N/A");
+  } else if (wifiInfoPage == 1) {
+    drawWifiInfoLine(row, "NETWORK ADDRESSING");
+    if (staConnected) {
+      drawWifiInfoLine(row, "IP: " + addressText(WiFi.localIP()));
+      drawWifiInfoLine(row, "Gateway: " + addressText(WiFi.gatewayIP()));
+      drawWifiInfoLine(row, "Mask: " + addressText(WiFi.subnetMask()));
+      drawWifiInfoLine(row, "DNS: " + addressText(WiFi.dnsIP(0)));
+    } else if (apEnabled) {
+      drawWifiInfoLine(row, "AP IP: " + addressText(WiFi.softAPIP()));
+      drawWifiInfoLine(row, "Gateway: N/A");
+      drawWifiInfoLine(row, "Mask: " + addressText(WiFi.softAPSubnetMask()));
+      drawWifiInfoLine(row, "DNS: N/A");
+    } else {
+      drawWifiInfoLine(row, "IP: N/A");
+      drawWifiInfoLine(row, "Gateway: N/A");
+      drawWifiInfoLine(row, "Mask: N/A");
+      drawWifiInfoLine(row, "DNS: N/A");
+    }
+  } else if (wifiInfoPage == 2) {
+    drawWifiInfoLine(row, "SIGNAL STRENGTH");
+    if (staConnected) {
+      int rssi = WiFi.RSSI();
+      const char* quality = rssi >= -50 ? "Excellent" : rssi >= -60 ? "Good" :
+                            rssi >= -70 ? "Fair" : "Weak";
+      drawWifiInfoLine(row, "SSID: " + WiFi.SSID());
+      drawWifiInfoLine(row, "RSSI: " + String(rssi) + " dBm");
+      drawWifiInfoLine(row, "Quality: " + String(quality));
+      drawWifiInfoLine(row, "Approximate indicator");
+    } else {
+      drawWifiInfoLine(row, "No station connection");
+      drawWifiInfoLine(row, "RSSI: N/A");
+    }
+  } else if (wifiInfoPage == 3) {
+    drawWifiInfoLine(row, "ACCESS POINT");
+    if (apEnabled && WiFi.softAPIP() != IPAddress(0, 0, 0, 0)) {
+      drawWifiInfoLine(row, "SSID: " + WiFi.softAPSSID());
+      drawWifiInfoLine(row, "IP: " + addressText(WiFi.softAPIP()));
+      int channel = WiFi.channel();
+      drawWifiInfoLine(row, "Channel: " + (channel > 0 ? String(channel) : String("N/A")));
+      drawWifiInfoLine(row, "Clients: " + String(WiFi.softAPgetStationNum()));
+      drawWifiInfoLine(row, "Security: WPA2-PSK");
+    } else drawWifiInfoLine(row, "AP Inactive");
+  } else {
+    drawWifiInfoLine(row, "CONNECTION DIAGNOSTICS");
+    drawWifiInfoLine(row, "Status: " + wifiStatusText(staEnabled, apEnabled, staConnected));
+    drawWifiInfoLine(row, "Uptime: " + String(now / 60000) + " min");
+    if (staConnected && wifiConnectedAt) {
+      drawWifiInfoLine(row, "Connected: " + String((now - wifiConnectedAt) / 60000) + " min");
+    } else if (staEnabled && !wifiConnecting) {
+      drawWifiInfoLine(row, "Result: " + wifiFailureText(WiFi.status()));
+    }
+    int channel = (staConnected || apEnabled) ? WiFi.channel() : 0;
+    drawWifiInfoLine(row, "Channel: " + (channel > 0 ? String(channel) : String("N/A")));
+    drawWifiInfoLine(row, "STA IP: " + (staConnected ? addressText(WiFi.localIP()) : String("N/A")));
+    drawWifiInfoLine(row, "AP IP: " + (apEnabled ? addressText(WiFi.softAPIP()) : String("N/A")));
+  }
+
+  display.setCursor(0, 72);
+  display.print("B: Next   Power: Exit");
+  display.pushSprite(0, 0);
+  lastWifiInfoRefresh = now;
+  wifiInfoDirty = false;
 }
 
 void setup() {
@@ -1109,13 +1272,16 @@ void loop() {
     if (WiFi.status() == WL_CONNECTED) {
       wifiConnecting = false;
       ledPatternStarted = now;
-      applyTimeZone();
-      configTime(0, 0, ntpServer);
+      configureNtpTime();
     } else if ((long)(now - wifiConnectDeadline) >= 0) {
       startConfigPortal();
       return;
     }
   }
+  bool stationConnected = WiFi.status() == WL_CONNECTED;
+  if (stationConnected && !wifiWasConnected) wifiConnectedAt = now;
+  if (!stationConnected) wifiConnectedAt = 0;
+  wifiWasConnected = stationConnected;
   updateMotionSensor(now);
   updateStatusLed(now);
   if (!clockIsSet && time(NULL) > 1704067200) {
@@ -1148,6 +1314,12 @@ void loop() {
     currentMood = nextMood;
     lastSaccade = 0;
     nextAutoMoodAt = now + random(15000, 35000);
+  }
+
+  if (wifiInfoActive) {
+    if (currentPage == PAGE_EYES) updatePhysicsAndMood();
+    if (wifiInfoDirty || now - lastWifiInfoRefresh >= 1000) drawWifiInfoScreen(now);
+    return;
   }
 
   static unsigned long lastFrame = 0;

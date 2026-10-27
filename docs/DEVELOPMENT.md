@@ -4,7 +4,7 @@
 
 1. Build the project in Codespaces and save the full compiler log if it fails.
 2. Verify display init and orientation on the original M5StickC.
-3. Verify BtnA setup hold, BtnB settings/mood/restart gestures, and the AXP192 third-button screen toggle/power-off gestures.
+3. Verify BtnA setup hold, BtnB diagnostic cycling/settings/mood/restart gestures, and the AXP192 third-button overlay exit/screen toggle/power-off gestures.
 4. Verify the setup access point and saving settings.
 5. Verify NTP and local clock settings.
 6. Only then optimise animation frame rate and battery usage.
