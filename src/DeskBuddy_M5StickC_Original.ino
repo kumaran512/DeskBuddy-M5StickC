@@ -131,6 +131,8 @@ float breathVal = 0;
 Preferences prefs;
 WebServer configServer(80);
 bool inConfigMode = false;
+bool portalRestartPending = false;
+unsigned long portalRestartAt = 0;
 
 struct TimeZoneEntry { const char* iana; const char* posix; };
 // ESP32 newlib accepts POSIX TZ rules, but this image has no zoneinfo database.
@@ -285,11 +287,19 @@ void handleConfigSave() {
   }
   String s   = configServer.arg("ssid");
   String p   = configServer.arg("pass");
+  if (s.length() > 32) {
+    configServer.send(400, "text/plain", "SSID must be 32 bytes or fewer");
+    return;
+  }
   // A blank password field means keep the saved password, not erase it.
   if (p.isEmpty()) {
     prefs.begin("deskbuddy", true);
     p = prefs.getString("pass", "");
     prefs.end();
+  }
+  if (p.length() > 63) {
+    configServer.send(400, "text/plain", "Wi-Fi password must be 63 bytes or fewer");
+    return;
   }
   String tz  = configServer.arg("tz");
   prefs.begin("deskbuddy", true);
@@ -305,8 +315,8 @@ void handleConfigSave() {
   configServer.send(200, "text/html",
     "<html><body style='font-family:sans-serif;background:#0c1929;color:#e8f4fc;padding:40px;'>"
     "<h2 style='color:#5ba3f5'>Saved!</h2><p>Rebooting in 2 seconds...</p></body></html>");
-  delay(2000);
-  ESP.restart();
+  portalRestartPending = true;
+  portalRestartAt = millis() + 2000;
 }
 
 void startConfigPortal() {
@@ -711,8 +721,6 @@ void handleTouch() {
         if (saveManualClock()) { currentPage = PAGE_CLOCK; clockNeedsRedraw = true; clockSaveError = false; setAlertLevel(ALERT_NONE); }
         else { clockSaveError = true; setAlertLevel(ALERT_IMPORTANT); }
       } else if (clockEditField == 8) { currentPage = PAGE_CLOCK; clockNeedsRedraw = true; setAlertLevel(ALERT_NONE); }
-    } else if (!bLongHandled && !bRepeatAdjusted && currentPage == PAGE_CLOCK) {
-      enterClockSettings();
     } else if (releaseDebounced && !bLongHandled && !bRepeatAdjusted &&
                (currentPage == PAGE_EYES || currentPage == PAGE_CLOCK)) {
       if (wifiInfoActive) wifiInfoPage = (wifiInfoPage + 1) % 5;
@@ -815,7 +823,7 @@ void updatePhysicsAndMood() {
   breathVal = sin(now / 800.0) * 1.5;  // Breathing effect
 
   // --- BLINK LOGIC ---
-  if (now > leftEye.nextBlinkTime) {
+  if ((long)(now - leftEye.nextBlinkTime) >= 0) {
     leftEye.blinking = true;
     leftEye.lastBlink = now;
     rightEye.blinking = true;
@@ -1285,8 +1293,23 @@ void loop() {
     updateStatusLed(now);
     return;
   }
+  if (restartPending) {
+    static bool restartFrameShown = false;
+    if (!restartFrameShown) {
+      display.fillSprite(TFT_BLACK);
+      display.setFreeFont(NULL);
+      display.setTextColor(TFT_WHITE, TFT_BLACK);
+      display.setCursor(42, 34);
+      display.print("Restarting...");
+      display.pushSprite(0, 0);
+      restartFrameShown = true;
+    }
+    if ((long)(millis() - restartAt) >= 0) ESP.restart();
+    return;
+  }
   if (inConfigMode) {
     configServer.handleClient();
+    if (portalRestartPending && (long)(now - portalRestartAt) >= 0) ESP.restart();
     updateStatusLed(now);
     return;
   }
@@ -1311,20 +1334,6 @@ void loop() {
     clockIsSet = true;
     writeRtcUtc(time(NULL));
     loadDraftFromClock();
-  }
-  if (restartPending) {
-    static bool restartFrameShown = false;
-    if (!restartFrameShown) {
-      display.fillSprite(TFT_BLACK);
-      display.setFreeFont(NULL);
-      display.setTextColor(TFT_WHITE, TFT_BLACK);
-      display.setCursor(42, 34);
-      display.print("Restarting...");
-      display.pushSprite(0, 0);
-      restartFrameShown = true;
-    }
-    if ((long)(millis() - restartAt) >= 0) ESP.restart();
-    return;
   }
   if (currentPage == PAGE_EYES && (long)(now - nextAutoMoodAt) >= 0 &&
       (long)(now - moodOverrideUntil) >= 0) {
